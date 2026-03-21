@@ -8,38 +8,69 @@
 #include "Telemetry.h"
 #include <string.h>
 
-static UART_HandleTypeDef	 *pTelemUart	 = NULL;
-static CRC_HandleTypeDef	 *pTelemCrc		 = NULL;
-static TelemetryFrame_t 	  current_frame;
+static CRC_HandleTypeDef *pCrc = NULL;
+static TelemetryTransport_t transport_fn = NULL;
 
-void Telemetry_Init(UART_HandleTypeDef *huart, CRC_HandleTypeDef *hcrc){
+static void Telemetry_BuildFrame(TelemetryFrame_t *frame, TelemetryPacketID_t packet_id, uint8_t payload, uint16_t paylod_len){
 
-	pTelemUart 	= huart;
-	pTelemCrc 	= hcrc;
+	frame -> sync_word = TELEM_SYNC_WORD;
+	frame -> timestamp = HAL_GetTick(); 		// Replace with the RTC value
+	frame -> packet_id = (uint8_t)packet_id;
 
-	current_frame.sync_word = TELEM_FRAME_START;
+	memset(frame -> payload, 0, TELEM_PAYLOAD_SIZE);
+
+	if(payload != null && payload_len <= TELEM_PAYLOAD_SIZE){
+		memcpy(frame -> payload, payload, payload_len);
+	}
+
+	uint32_t word_count = (sizeof(TelemetryFrame_t) - sizeof(uint32_t)) / 4;
+
+	frame -> crc = HAL_CRC_Calculate(pCrc, (uint32_t *)frame, word_count);
+
 }
 
-HAL_StatusTypeDef Telemetry_SendSystemStatus(uint8_t status_code){
+void Telemetr_Init(CRC_HandleTypeDef *hcrc){
+	pCrc = hcrc;
+}
 
-	if(pTelemUart ==  NULL || pTelemCrc == NULL)
+void Telemetry_SetTransport(TelemetryTransport_t transport){
+	transport_fn = transport;
+}
+
+HAL_StatusTypeDef Telemetry_Send(TelemetryPacketID_t packet_id, uint8_t *payload, uint16_t payload_len){
+
+	if(pCrc == NULL || transport_fn == NULL){
 		return HAL_ERROR;
-	if(HAL_UART_GetState(pTelemUart) != HAL_UART_STATE_READY)
-		return HAL_BUSY;
+	}
 
-	current_frame.timestamp = HAL_GetTick();
-	current_frame.packet_id = 0x01;
-	memset(current_frame.payload, 0, TELEM_PAYLOAD_SIZE);
-	current_frame.payload[0] = status_code;
+	TelemetryFrame_t frame;
 
-	uint32_t data_size_words = (sizeof(TelemetryFrame_t) - sizeof(uint32_t)) / 4;
+	Telemetry_BuildFrame(&frame, packet_id, payload, payload_len);
 
-	current_frame.crc = HAL_CRC_Calculate(pTelemCrc, (uint32_t *)&current_frame, data_size_words);
-
-	return HAL_UART_Transmit_DMA(pTelemUart, (uint8_t *)&current_frame, sizeof(TelemetryFrame_t));
+	return transport_fn((uint8_t *)frame, sizeof(TelemetryFrame_t));
 
 }
 
+HAL_StatusTypeDef Telemetry_SendSystemStatus(uint8_t status){
+
+	uint8_t payload[] = {status};
+	Telemetry_Send(TELEM_ID_SYSTEM_STATUS, paylod, 1);
+
+}
+
+HAL_StatusTypeDef Telemetry_SendSensorData(float temperature, float voltage)
+{
+    uint8_t payload[2 * sizeof(float)];
+
+    memcpy(payload, &temperature, sizeof(float));
+    memcpy(payload + sizeof(float), &voltage, sizeof(float));
+
+    return Telemetry_Send(
+        TELEM_ID_SENSOR_DATA,
+        payload,
+        2 * sizeof(float)
+    );
+}
 
 
 

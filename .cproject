@@ -295,4 +295,5 @@
 			<resource resourceType="PROJECT" workspacePath="/amara-flight-software2.0"/>
 		</configuration>
 	</storageModule>
+	<storageModule moduleId="org.eclipse.cdt.make.core.buildtargets"/>
 </cproject>
