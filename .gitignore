@@ -1,0 +1,24 @@
+# Build folders
+Debug/
+Release/
+build/
+Drivers/
+Middlewares/
+FATFS/
+
+# Object files
+*.o
+*.d
+
+# Executables
+*.elf
+*.bin
+*.hex
+
+# STM32CubeIDE
+.metadata/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
