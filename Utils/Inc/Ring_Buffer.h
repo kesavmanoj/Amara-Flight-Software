@@ -13,7 +13,8 @@
 
 /* 			BYTE BUFFER				 */
 
-#define RING_BUFFER_SIZE 128
+/* Circular byte buffer capacity; usable bytes are RING_BUFFER_SIZE - 1. */
+#define RING_BUFFER_SIZE 256
 
 typedef struct {
 	uint8_t buffer[RING_BUFFER_SIZE];

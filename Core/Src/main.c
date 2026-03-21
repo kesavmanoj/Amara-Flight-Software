@@ -63,6 +63,8 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+static volatile uint32_t g_telem_tx_complete_count = 0;
+static volatile uint32_t g_telem_error_count = 0;
 
 /* USER CODE END PV */
 
@@ -121,12 +123,21 @@ int main(void)
   MX_FATFS_Init();
   /* USER CODE BEGIN 2 */
 
-  UART_Driver_Init(&huart2);
+  UART_Driver_Status_t uart_status = UART_Driver_Init(&huart2);
   CommandParser_Init();
-  ADC_Monitor_Init(&hadc1);
-  ADC_Monitor_Start();
+  ADC_Monitor_Status_t adc_init_status = ADC_Monitor_Init(&hadc1);
+  ADC_Monitor_Status_t adc_start_status = ADC_Monitor_Start();
+  Telemetry_Init(&hcrc, &huart1);
+  bool boot_telem_status = Telemetry_SendSystemStatus(0x01U);
 
-  Logger_Info("Initialization Complete: \r\n");
+  Logger_Info("Initialization Complete");
+  Logger_Info("Debug UART=USART2 @115200, Telemetry UART=USART1 @57600");
+  Logger_Info("Startup status: UART=%d ADC_INIT=%d ADC_START=%d TELEM_BOOT_QUEUE=%d",
+		  uart_status,
+		  adc_init_status,
+		  adc_start_status,
+		  boot_telem_status ? 1 : 0);
+
 
   /* USER CODE END 2 */
 
@@ -143,10 +154,57 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+	  static uint32_t last_heartbeat_ms = 0;
+	  static uint32_t last_telem_queue_ms = 0;
+	  static uint32_t last_telem_report_ms = 0;
+	  static uint32_t last_adc_report_ms = 0;
+	  static uint8_t telemetry_status_counter = 0;
+	  uint32_t now = HAL_GetTick();
 	  
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+	CommandParser_Process();
+	Telemetry_Process();
+	HAL_IWDG_Refresh(&hiwdg);
+
+	if((now - last_heartbeat_ms) >= 500U){
+		last_heartbeat_ms = now;
+		HAL_GPIO_TogglePin(LD2_HEARTBEAT_GPIO_Port, LD2_HEARTBEAT_Pin);
+	}
+
+	if((now - last_telem_queue_ms) >= 2000U){
+		uint8_t status_code = (uint8_t)(0x10U | (telemetry_status_counter & 0x0FU));
+		bool queued = Telemetry_SendSystemStatus(status_code);
+		Logger_Info("Telemetry queue attempt: queued=%d status=0x%02X",
+				queued ? 1 : 0,
+				status_code);
+		telemetry_status_counter++;
+		last_telem_queue_ms = now;
+	}
+
+	if((now - last_telem_report_ms) >= 3000U){
+		Logger_Info("Telemetry counters: tx_complete=%lu tx_error=%lu",
+				(unsigned long)g_telem_tx_complete_count,
+				(unsigned long)g_telem_error_count);
+		last_telem_report_ms = now;
+	}
+
+	if((now - last_adc_report_ms) >= 5000U){
+		ADC_HealthData_t adc_data;
+		ADC_Monitor_Status_t adc_status = ADC_Monitor_GetData(&adc_data);
+
+		if(adc_status == ADC_MONITOR_OK){
+			Logger_Info("ADC health: VDDA=%.3fV TEMP=%.2fC BATT=%.3fV",
+					adc_data.vdda_voltage,
+					adc_data.mcu_temp_c,
+					adc_data.battery_voltage);
+		} else {
+			Logger_Warn("ADC health read failed: status=%d", adc_status);
+		}
+
+		last_adc_report_ms = now;
+	}
   }
   /* USER CODE END 3 */
 }
@@ -220,11 +278,21 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
+    if (huart == &huart1)
+    {
+        g_telem_tx_complete_count++;
+    }
+
     Telemetry_OnTxComplete(huart);
 }
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
+    if (huart == &huart1)
+    {
+        g_telem_error_count++;
+    }
+
     Telemetry_OnError(huart);
 }
 

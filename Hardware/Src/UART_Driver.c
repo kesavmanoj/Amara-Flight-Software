@@ -6,8 +6,6 @@
  */
 #include "UART_Driver.h"
 
-#define UART_RX_BUFFER_SIZE 128
-
 static UART_HandleTypeDef *pUart = NULL;
 static RingBuffer_t rx_buffer;
 

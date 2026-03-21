@@ -14,11 +14,10 @@
 #include <stdint.h>
 
 #define TELEM_SYNC_WORD    0x55AA
-#define TELEM_PAYLOAD_SIZE 64
-#define TELEM_QUEUE_SIZE   8
-
-#define TELEM_TX_BUFFER_SIZE 256
-#define TELEM_DMA_CHUNK_SIZE 128
+/* Keep the non-CRC portion of TelemetryFrame_t 4-byte aligned for HAL_CRC_Calculate(). */
+#define TELEM_PAYLOAD_SIZE 61
+/* Circular queue capacity; usable frame slots are TELEM_QUEUE_SIZE - 1. */
+#define TELEM_QUEUE_SIZE   9
 
 typedef enum {
     TELEM_ID_SYSTEM_STATUS = 0x01,
