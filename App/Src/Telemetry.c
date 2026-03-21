@@ -7,16 +7,15 @@
 
 #include "Telemetry.h"
 #include "Ring_Buffer.h"
+#include "UART_Driver.h"
 #include <string.h>
 
 static CRC_HandleTypeDef *pCrc = NULL;
-static UART_HandleTypeDef *pUart = NULL;
 
 static TelemetryFrame_t frame_buffer[TELEM_QUEUE_SIZE];
-static TelemetryFrame_t dma_frame;
+static TelemetryFrame_t tx_frame;
 static FrameQueue_t telem_queue;
 
-static volatile uint8_t dma_busy = 0;
 static bool frame_pending = false;
 
 static void Telemetry_BuildFrame(TelemetryFrame_t *frame, TelemetryPacketID_t id, uint8_t *payload, uint16_t len){
@@ -38,29 +37,26 @@ static void Telemetry_BuildFrame(TelemetryFrame_t *frame, TelemetryPacketID_t id
 }
 
 void Telemetry_Init(CRC_HandleTypeDef *hcrc, UART_HandleTypeDef *huart){
+	(void)huart;
 
 	if((hcrc == NULL) || (huart == NULL)){
 		pCrc = NULL;
-		pUart = NULL;
-		dma_busy = 0;
 		frame_pending = false;
 		return;
 	}
 
-	pUart 	= huart;
 	pCrc 	= hcrc;
 
 	FrameQueue_Init(&telem_queue, (uint8_t *)frame_buffer, sizeof(TelemetryFrame_t), TELEM_QUEUE_SIZE);
-	dma_busy = 0;
 	frame_pending = false;
-	memset(&dma_frame, 0, sizeof(dma_frame));
+	memset(&tx_frame, 0, sizeof(tx_frame));
 
 }
 
 
 bool Telemetry_QueuePacket(TelemetryPacketID_t id, uint8_t* payload, uint16_t len){
 
-	if((pCrc == NULL) || (pUart == NULL)) return false;
+	if(pCrc == NULL) return false;
 	if(len > TELEM_PAYLOAD_SIZE) return false;
 
 	TelemetryFrame_t frame;
@@ -71,20 +67,17 @@ bool Telemetry_QueuePacket(TelemetryPacketID_t id, uint8_t* payload, uint16_t le
 }
 
 void Telemetry_Process(void){
-
-	if((pCrc == NULL) || (pUart == NULL)) return;
-	if(dma_busy) return;
+	if(pCrc == NULL) return;
 
 	if(!frame_pending){
-		if(!FrameQueue_Pop(&telem_queue, &dma_frame)){
+		if(!FrameQueue_Pop(&telem_queue, &tx_frame)){
 			return;
 		}
 
 		frame_pending = true;
 	}
 
-	if(HAL_UART_Transmit_DMA(pUart, (uint8_t *)&dma_frame, sizeof(dma_frame)) == HAL_OK){
-		dma_busy = 1;
+	if(UART_WriteChannel(UART_DRIVER_CHANNEL_TELEMETRY, (uint8_t *)&tx_frame, sizeof(tx_frame)) == UART_DRIVER_OK){
 		frame_pending = false;
 	}
 }
@@ -102,18 +95,12 @@ bool Telemetry_SendSystemStatus(uint8_t status)
 
 void Telemetry_OnTxComplete(UART_HandleTypeDef *huart)
 {
-    if (huart == pUart)
-    {
-        dma_busy = 0;
-    }
+	(void)huart;
 }
 
 void Telemetry_OnError(UART_HandleTypeDef *huart)
 {
-    if (huart == pUart)
-    {
-        dma_busy = 0;
-    }
+	(void)huart;
 }
 
 

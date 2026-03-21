@@ -17,7 +17,6 @@
   */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
-#include <OLED_Display.h>
 #include "main.h"
 #include "cmsis_os.h"
 #include "adc.h"
@@ -124,6 +123,7 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
   UART_Driver_Status_t uart_status = UART_Driver_Init(&huart2);
+  UART_Driver_Status_t telem_uart_status = UART_Driver_InitChannel(UART_DRIVER_CHANNEL_TELEMETRY, &huart1);
   CommandParser_Init();
   ADC_Monitor_Status_t adc_init_status = ADC_Monitor_Init(&hadc1);
   ADC_Monitor_Status_t adc_start_status = ADC_Monitor_Start();
@@ -131,9 +131,10 @@ int main(void)
   bool boot_telem_status = Telemetry_SendSystemStatus(0x01U);
 
   Logger_Info("Initialization Complete");
-  Logger_Info("Debug UART=USART2 @115200, Telemetry UART=USART1 @57600");
-  Logger_Info("Startup status: UART=%d ADC_INIT=%d ADC_START=%d TELEM_BOOT_QUEUE=%d",
+  Logger_Info("CLI/Logger UART=USART2 @115200, Telemetry UART=USART1 @57600");
+  Logger_Info("Startup status: UART=%d TELEM_UART=%d ADC_INIT=%d ADC_START=%d TELEM_BOOT_QUEUE=%d",
 		  uart_status,
+		  telem_uart_status,
 		  adc_init_status,
 		  adc_start_status,
 		  boot_telem_status ? 1 : 0);
@@ -184,7 +185,7 @@ int main(void)
 	}
 
 	if((now - last_telem_report_ms) >= 3000U){
-		Logger_Info("Telemetry counters: tx_complete=%lu tx_error=%lu",
+		Logger_Info("Telemetry UART DMA counters: tx_complete=%lu tx_error=%lu",
 				(unsigned long)g_telem_tx_complete_count,
 				(unsigned long)g_telem_error_count);
 		last_telem_report_ms = now;
@@ -283,7 +284,7 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
         g_telem_tx_complete_count++;
     }
 
-    Telemetry_OnTxComplete(huart);
+    UART_TxCpltCallback(huart);
 }
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
@@ -293,7 +294,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
         g_telem_error_count++;
     }
 
-    Telemetry_OnError(huart);
+    UART_ErrorCallback(huart);
 }
 
 /* USER CODE END 4 */

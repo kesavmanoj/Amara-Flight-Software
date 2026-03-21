@@ -62,6 +62,8 @@ void Error_Handler(void);
 #define B1_USER_BUTTON_EXTI_IRQn EXTI15_10_IRQn
 #define LD2_HEARTBEAT_Pin GPIO_PIN_5
 #define LD2_HEARTBEAT_GPIO_Port GPIOA
+#define LORA_CS_Pin GPIO_PIN_5
+#define LORA_CS_GPIO_Port GPIOC
 #define SD_CS_Pin GPIO_PIN_0
 #define SD_CS_GPIO_Port GPIOB
 #define PWR_EN_SENSORS_Pin GPIO_PIN_1
