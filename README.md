@@ -6,6 +6,10 @@ This firmware is a modular STM32F446RE-based embedded platform for a CubeSat fli
 
 Key capabilities present in the code today are interrupt-driven UART reception, structured UART logging, continuous ADC health monitoring with DMA, a table-driven CLI command framework, and an early telemetry packet module with CRC support. The project also has generated scaffolding for SPI, I2C, SDIO/FatFs, RTC, CRC, watchdog, and FreeRTOS.
 
+## Note
+To use this program, clone the repo then import the .ioc project file into STM32CubeMX and generate code. Import into STM32CubeIDE and build the project. All necessary files should be generated and ready to use.
+
+
 ## 2. System Architecture
 High-level flow:
 `USART2 RX interrupt -> ring buffer -> command line assembly -> tokenization -> command table dispatch -> module handler -> UART response/log output`
