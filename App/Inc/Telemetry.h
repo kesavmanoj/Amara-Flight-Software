@@ -10,7 +10,7 @@
 
 
 #include "stm32f4xx_hal.h"
-#include "Ring_Buffer.h"
+#include <stdbool.h>
 #include <stdint.h>
 
 #define TELEM_SYNC_WORD    0x55AA
@@ -18,7 +18,7 @@
 #define TELEM_QUEUE_SIZE   8
 
 #define TELEM_TX_BUFFER_SIZE 256
-
+#define TELEM_DMA_CHUNK_SIZE 128
 
 typedef enum {
     TELEM_ID_SYSTEM_STATUS = 0x01,
@@ -43,6 +43,10 @@ bool Telemetry_QueuePacket(TelemetryPacketID_t id, uint8_t *payload, uint16_t le
 void Telemetry_Process(void);
 
 bool Telemetry_SendSystemStatus(uint8_t status);
+
+void Telemetry_OnTxComplete(UART_HandleTypeDef *huart);
+
+void Telemetry_OnError(UART_HandleTypeDef *huart);
 
 
 #endif /* INC_TELEMETRY_H_ */

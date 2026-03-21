@@ -55,6 +55,9 @@ bool RingBuffer_Pop(RingBuffer_t *rb, uint8_t *data){
 
 bool RingBuffer_PushArray(RingBuffer_t *rb, uint8_t *data, uint16_t len){
 
+	if((rb == NULL) || (data == NULL)) return false;
+	if((uint16_t)(RING_BUFFER_SIZE - 1U - RingBuffer_Available(rb)) < len) return false;
+
 	for(uint16_t i = 0; i < len; i++){
 		if(!RingBuffer_Push(rb, data[i])) return false;
 	}
@@ -65,9 +68,11 @@ bool RingBuffer_PushArray(RingBuffer_t *rb, uint8_t *data, uint16_t len){
 
 uint16_t RingBuffer_PopArray(RingBuffer_t *rb, uint8_t *data, uint16_t max_len){
 
+	if((rb == NULL) || (data == NULL)) return 0;
+
 	uint16_t count = 0;
 
-	while(count < max_len && RingBuffer_IsEmpty(rb)){
+	while(count < max_len && !RingBuffer_IsEmpty(rb)){
 		data[count++] = rb -> buffer[rb -> tail];
 		rb -> tail = next_index(rb -> tail);
 	}

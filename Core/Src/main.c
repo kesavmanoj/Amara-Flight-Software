@@ -127,6 +127,7 @@ int main(void)
   ADC_Monitor_Start();
 
   Logger_Info("Initialization Complete: \r\n");
+
   /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -215,6 +216,16 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 {
     ADC_Monitor_ConvCpltCallback(hadc);
+}
+
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+    Telemetry_OnTxComplete(huart);
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    Telemetry_OnError(huart);
 }
 
 /* USER CODE END 4 */

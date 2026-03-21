@@ -12,24 +12,37 @@
 
 #define LOG_BUFFER_SIZE 256
 
-static char log_buffer[LOG_BUFFER_SIZE];
-
 // Helper Functions
-static void Get_Timestamp(char* buf){
+static void Get_Timestamp(char* buf, size_t buf_size){
 	RTC_TimeTypeDef sTime;
 	RTC_DateTypeDef sDate;
 
-	HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
-	HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
+	if((HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN) != HAL_OK) ||
+	   (HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN) != HAL_OK)){
+		snprintf(buf, buf_size, "[BOOT+%lums]", HAL_GetTick());
+		return;
+	}
 
-	snprintf(buf, 15, "[%02d:%02d:%02d]", sTime.Hours, sTime.Minutes, sTime.Seconds);
+	/* RTC is initialized to a default epoch on boot; fall back to uptime until it is set. */
+	if((sDate.Year == 0U) &&
+	   (sDate.Month == RTC_MONTH_JANUARY) &&
+	   (sDate.Date == 1U) &&
+	   (sTime.Hours == 0U) &&
+	   (sTime.Minutes == 0U) &&
+	   (sTime.Seconds == 0U)){
+		snprintf(buf, buf_size, "[BOOT+%lums]", HAL_GetTick());
+		return;
+	}
+
+	snprintf(buf, buf_size, "[%02u:%02u:%02u]", sTime.Hours, sTime.Minutes, sTime.Seconds);
 }
 
 static void Logger_Log(const char *prefix, const char *fmt, va_list args)
 {
-    char timestamp[15];
+    char timestamp[24];
+    char log_buffer[LOG_BUFFER_SIZE];
 
-    Get_Timestamp(timestamp);
+    Get_Timestamp(timestamp, sizeof(timestamp));
 
     int len = 0;
 
