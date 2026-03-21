@@ -36,7 +36,7 @@ typedef struct __attribute__((packed)) {
 
 // API Functions
 
-void Telemetry_Init(CRC_HandleTypeDef *hcrc);
+void Telemetry_Init(CRC_HandleTypeDef *hcrc, UART_HandleTypeDef *huart);
 
 bool Telemetry_QueuePacket(TelemetryPacketID_t id, uint8_t *payload, uint16_t len);
 

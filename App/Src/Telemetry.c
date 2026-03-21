@@ -9,6 +9,7 @@
 #include <string.h>
 
 static CRC_HandleTypeDef *pCrc = NULL;
+static UART_HandleTypeDef *pUart = NULL;
 
 static TelemetryFrame_t frame_buffer[TELEM_QUEUE_SIZE];
 static FrameQueue_t telem_queue;
@@ -39,9 +40,10 @@ static void Telemetry_BuildFrame(TelemetryFrame_t *frame, TelemetryPacketID_t id
 
 }
 
-void Telemetry_Init(CRC_HandleTypeDef *hcrc){
+void Telemetry_Init(CRC_HandleTypeDef *hcrc, UART_HandleTypeDef *huart){
 
-	pCrc = hcrc;
+	pUart 	= huart;
+	pCrc 	= hcrc;
 
 	FrameQueue_Init(&telem_queue, (uint8_t *)frame_buffer, sizeof(TelemetryFrame_t), TELEM_QUEUE_SIZE);
 	RingBuffer_Init(&tx_buffer);
@@ -76,7 +78,7 @@ void Telemetry_Process(void){
 		if(len > 0){
 			dma_busy = 1;
 
-			HAL_UART_Transmit_DMA(&huart2, dma_tx_buffer, len);
+			HAL_UART_Transmit_DMA(pUart, dma_tx_buffer, len);
 		}
 	}
 //	uint8_t byte;
@@ -104,7 +106,7 @@ bool Telemetry_SendSystemStatus(uint8_t status)
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
-    if (huart == &huart2)
+    if (huart == pUart)
     {
         dma_busy = 0;
     }
@@ -112,7 +114,7 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
-    if (huart == &huart2)
+    if (huart == pUart)
     {
         dma_busy = 0; // recover
     }
