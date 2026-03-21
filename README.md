@@ -1,9 +1,14 @@
 # CubeSat Flight Computer Emulator
 
+--- AI GENERATED README ---
 ## 1. Project Overview
 This firmware is a modular STM32F446RE-based embedded platform for a CubeSat flight computer emulator, built in C on top of STM32 HAL. The codebase is organized like a production-oriented flight software stack: peripheral drivers in `Hardware`, reusable utilities in `Utils`, application logic in `App`, and CubeMX-generated board support in `Core`.
 
 Key capabilities present in the code today are interrupt-driven UART reception, structured UART logging, continuous ADC health monitoring with DMA, a table-driven CLI command framework, and an early telemetry packet module with CRC support. The project also has generated scaffolding for SPI, I2C, SDIO/FatFs, RTC, CRC, watchdog, and FreeRTOS.
+
+## Note
+To use this program, clone the repo then import the .ioc project file into STM32CubeMX and generate code. Import into STM32CubeIDE and build the project. All necessary files should be generated and ready to use.
+
 
 ## 2. System Architecture
 High-level flow:
