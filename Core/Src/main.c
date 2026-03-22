@@ -127,7 +127,7 @@ int main(void)
   CommandParser_Init();
   ADC_Monitor_Status_t adc_init_status = ADC_Monitor_Init(&hadc1);
   ADC_Monitor_Status_t adc_start_status = ADC_Monitor_Start();
-  Telemetry_Init(&hcrc, &huart1);
+  Telemetry_Init(&hcrc);
   bool boot_telem_status = Telemetry_SendSystemStatus(0x01U);
 
   Logger_Info("Initialization Complete");
@@ -196,10 +196,16 @@ int main(void)
 		ADC_Monitor_Status_t adc_status = ADC_Monitor_GetData(&adc_data);
 
 		if(adc_status == ADC_MONITOR_OK){
+			bool adc_telem_queued = Telemetry_SendADCHealth(
+					adc_data.vdda_voltage,
+					adc_data.battery_voltage,
+					adc_data.mcu_temp_c);
+
 			Logger_Info("ADC health: VDDA=%.3fV TEMP=%.2fC BATT=%.3fV",
 					adc_data.vdda_voltage,
 					adc_data.mcu_temp_c,
 					adc_data.battery_voltage);
+			Logger_Info("ADC telemetry queue: queued=%d", adc_telem_queued ? 1 : 0);
 		} else {
 			Logger_Warn("ADC health read failed: status=%d", adc_status);
 		}

@@ -21,9 +21,25 @@
 
 typedef enum {
     TELEM_ID_SYSTEM_STATUS = 0x01,
-    TELEM_ID_SENSOR_DATA   = 0x02
+    TELEM_ID_ADC_HEALTH    = 0x02,
+    TELEM_ID_EVENT         = 0x03
 } TelemetryPacketID_t;
 
+typedef struct __attribute__((packed)) {
+    uint8_t status_code;
+    uint32_t uptime_ms;
+} TelemetrySystemStatusPayload_t;
+
+typedef struct __attribute__((packed)) {
+    float vdda_voltage;
+    float battery_voltage;
+    float mcu_temp_c;
+} TelemetryADCHealthPayload_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t event_code;
+    uint32_t event_value;
+} TelemetryEventPayload_t;
 
 typedef struct __attribute__((packed)) {
     uint16_t sync_word;
@@ -35,17 +51,15 @@ typedef struct __attribute__((packed)) {
 
 // API Functions
 
-void Telemetry_Init(CRC_HandleTypeDef *hcrc, UART_HandleTypeDef *huart);
+void Telemetry_Init(CRC_HandleTypeDef *hcrc);
 
 bool Telemetry_QueuePacket(TelemetryPacketID_t id, uint8_t *payload, uint16_t len);
 
 void Telemetry_Process(void);
 
 bool Telemetry_SendSystemStatus(uint8_t status);
-
-void Telemetry_OnTxComplete(UART_HandleTypeDef *huart);
-
-void Telemetry_OnError(UART_HandleTypeDef *huart);
+bool Telemetry_SendADCHealth(float vdda_voltage, float battery_voltage, float mcu_temp_c);
+bool Telemetry_SendEvent(uint8_t event_code, uint32_t event_value);
 
 
 #endif /* INC_TELEMETRY_H_ */

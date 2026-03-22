@@ -35,11 +35,9 @@ static void Telemetry_BuildFrame(TelemetryFrame_t *frame, TelemetryPacketID_t id
 	frame -> crc = HAL_CRC_Calculate(pCrc, (uint32_t *)frame, word_count);
 
 }
-// REMOVE THE HUART PARAMETER IN THIS AND ALL FUNCTION CALLS
-void Telemetry_Init(CRC_HandleTypeDef *hcrc, UART_HandleTypeDef *huart){
-	(void)huart;
 
-	if((hcrc == NULL) || (huart == NULL)){
+void Telemetry_Init(CRC_HandleTypeDef *hcrc){
+	if(hcrc == NULL){
 		pCrc = NULL;
 		frame_pending = false;
 		return;
@@ -84,23 +82,57 @@ void Telemetry_Process(void){
 
 bool Telemetry_SendSystemStatus(uint8_t status)
 {
-    uint8_t payload[1] = {status};
+    TelemetrySystemStatusPayload_t payload;
+
+    if(sizeof(payload) > TELEM_PAYLOAD_SIZE){
+        return false;
+    }
+
+    payload.status_code = status;
+    payload.uptime_ms = HAL_GetTick();
 
     return Telemetry_QueuePacket(
         TELEM_ID_SYSTEM_STATUS,
-        payload,
-        1
+        (uint8_t *)&payload,
+        sizeof(payload)
     );
 }
 
-void Telemetry_OnTxComplete(UART_HandleTypeDef *huart)
+bool Telemetry_SendADCHealth(float vdda_voltage, float battery_voltage, float mcu_temp_c)
 {
-	(void)huart;
+    TelemetryADCHealthPayload_t payload;
+
+    if(sizeof(payload) > TELEM_PAYLOAD_SIZE){
+        return false;
+    }
+
+    payload.vdda_voltage = vdda_voltage;
+    payload.battery_voltage = battery_voltage;
+    payload.mcu_temp_c = mcu_temp_c;
+
+    return Telemetry_QueuePacket(
+        TELEM_ID_ADC_HEALTH,
+        (uint8_t *)&payload,
+        sizeof(payload)
+    );
 }
 
-void Telemetry_OnError(UART_HandleTypeDef *huart)
+bool Telemetry_SendEvent(uint8_t event_code, uint32_t event_value)
 {
-	(void)huart;
+    TelemetryEventPayload_t payload;
+
+    if(sizeof(payload) > TELEM_PAYLOAD_SIZE){
+        return false;
+    }
+
+    payload.event_code = event_code;
+    payload.event_value = event_value;
+
+    return Telemetry_QueuePacket(
+        TELEM_ID_EVENT,
+        (uint8_t *)&payload,
+        sizeof(payload)
+    );
 }
 
 
