@@ -1,4 +1,4 @@
-# CubeSat Flight Computer Emulator
+# CubeSat Flight Computer Emulator (UNFINISHED)
 
 ## 1. Project Overview
 This firmware is a modular STM32F446RE-based embedded platform for a CubeSat flight computer emulator, written in C on top of STM32 HAL. The codebase follows a layered embedded structure:
