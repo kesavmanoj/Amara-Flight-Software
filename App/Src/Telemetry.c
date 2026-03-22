@@ -35,7 +35,7 @@ static void Telemetry_BuildFrame(TelemetryFrame_t *frame, TelemetryPacketID_t id
 	frame -> crc = HAL_CRC_Calculate(pCrc, (uint32_t *)frame, word_count);
 
 }
-
+// REMOVE THE HUART PARAMETER IN THIS AND ALL FUNCTION CALLS
 void Telemetry_Init(CRC_HandleTypeDef *hcrc, UART_HandleTypeDef *huart){
 	(void)huart;
 

@@ -9,11 +9,13 @@
 #define UART_TX_DMA_BUFFER_SIZE 128U
 
 typedef struct {
+
 	UART_HandleTypeDef *huart;
 	RingBuffer_t tx_buffer;
 	uint8_t tx_dma_buffer[UART_TX_DMA_BUFFER_SIZE];
 	volatile uint16_t tx_dma_len;
 	volatile uint8_t dma_busy;
+
 } UART_ChannelState_t;
 
 static UART_ChannelState_t uart_channels[UART_DRIVER_CHANNEL_COUNT];
