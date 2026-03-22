@@ -1,204 +1,277 @@
 # CubeSat Flight Computer Emulator
 
---- AI GENERATED README ---
 ## 1. Project Overview
-This firmware is a modular STM32F446RE-based embedded platform for a CubeSat flight computer emulator, built in C on top of STM32 HAL. The codebase is organized like a production-oriented flight software stack: peripheral drivers in `Hardware`, reusable utilities in `Utils`, application logic in `App`, and CubeMX-generated board support in `Core`.
+This firmware is a modular STM32F446RE-based embedded platform for a CubeSat flight computer emulator, written in C on top of STM32 HAL. The codebase follows a layered embedded structure:
 
-Key capabilities present in the code today are interrupt-driven UART reception, structured UART logging, continuous ADC health monitoring with DMA, a table-driven CLI command framework, and an early telemetry packet module with CRC support. The project also has generated scaffolding for SPI, I2C, SDIO/FatFs, RTC, CRC, watchdog, and FreeRTOS.
+- `Core`: CubeMX-generated MCU and peripheral initialization
+- `Hardware`: board/peripheral-facing drivers
+- `Utils`: reusable infrastructure such as logging and buffering
+- `App`: application logic, command handling, and telemetry framing
+
+The current firmware provides:
+
+- interrupt-driven CLI reception on `USART2`
+- DMA-backed non-blocking UART TX for both console and telemetry
+- UART text logging
+- continuous ADC monitoring with DMA
+- a table-driven command system
+- binary telemetry frame generation with CRC on `USART1`
 
 ## Note
-To use this program, clone the repo then import the .ioc project file into STM32CubeMX and generate code. Import into STM32CubeIDE and build the project. All necessary files should be generated and ready to use.
-
+Import the `.ioc` file into STM32CubeMX, regenerate code as needed, then build/flash with STM32CubeIDE.
 
 ## 2. System Architecture
-High-level flow:
-`USART2 RX interrupt -> ring buffer -> command line assembly -> tokenization -> command table dispatch -> module handler -> UART response/log output`
+High-level data flow:
 
-ADC path:
-`ADC1 scan sequence -> DMA circular buffer -> ADC completion callback -> processing buffer -> engineering-unit conversion -> command/query output`
+- CLI/logging path: `USART2 RX IRQ -> RX ring buffer -> CommandParser_Process() -> command dispatch -> Logger/UART console TX`
+- telemetry path: `application status -> telemetry frame builder -> frame queue -> UART driver telemetry channel -> USART1 DMA TX`
+- ADC path: `ADC1 scan + DMA -> ADC conversion callback -> processed engineering values -> CLI/log output`
 
-Planned telemetry path:
-`application status -> telemetry frame builder -> CRC -> USART1 DMA transmit`
+Current UART ownership:
 
-Layer separation is good overall:
-- `Core`: MCU/peripheral initialization and ISR entry points.
-- `Hardware`: device-facing drivers and bus abstractions.
-- `Utils`: shared infrastructure such as logging and buffering.
-- `App`: parser, command dispatch, and telemetry framing.
+- `USART2 @ 115200`: CLI + logger text
+- `USART1 @ 57600`: binary telemetry
+
+This split keeps readable console traffic separate from binary telemetry frames.
 
 ## 3. Firmware Modules
 
 ### UART Driver
-Purpose: provide a simple console/transport layer over HAL UART.
+Purpose: provide a transport layer over HAL UART with interrupt RX and DMA-backed non-blocking TX.
 
 Internal design:
-- RX is interrupt-driven, one byte at a time.
-- ISR callback pushes bytes into a fixed ring buffer and immediately rearms reception.
-- Application code drains the buffer through `UART_ReadByte()`.
 
-Key details:
-- RX path is appropriately minimal in interrupt context.
-- TX uses blocking `HAL_UART_Transmit()`, so the driver is only half non-blocking today.
-- The active instance is `USART2` in `main()`, which makes USART2 the current CLI/log port.
+- the driver now manages two logical TX channels:
+  - `UART_DRIVER_CHANNEL_CONSOLE`
+  - `UART_DRIVER_CHANNEL_TELEMETRY`
+- each channel owns:
+  - bound HAL UART handle
+  - TX ring buffer
+  - DMA staging buffer
+  - `tx_dma_len`
+  - `dma_busy`
+- console RX remains separate and interrupt-driven through a dedicated RX ring buffer
 
-Embedded considerations:
-- Good ISR discipline on RX.
-- Deterministic RX buffering.
-- No TX queue, no DMA/IT transmit path, and silent byte loss is possible if the ring buffer overflows.
+Key functions:
+
+- `UART_Driver_Init()`: binds the console channel and starts 1-byte interrupt RX
+- `UART_Driver_InitChannel()`: binds an additional logical channel to a HAL UART
+- `UART_Write()`: writes to the console channel
+- `UART_WriteChannel()`: writes to a selected logical channel
+- `UART_RxCpltCallback()`: stores a received byte and rearms RX
+- `UART_TxCpltCallback()`: clears DMA busy state and starts the next queued TX chunk
+- `UART_ErrorCallback()`: clears busy state and retries queued TX work
+
+Important implementation details:
+
+- TX is non-blocking: callers enqueue data into the channel TX ring buffer
+- `UART_StartTxDMA()` pops up to `128` bytes into a stable DMA buffer, then starts `HAL_UART_Transmit_DMA()`
+- if a DMA start fails, the staged chunk remains in the DMA buffer and is retried later
+- short critical sections disable interrupts while shared TX state is updated
+
+Embedded design considerations:
+
+- minimal ISR work on RX
+- DMA chunking avoids long blocking transmits
+- channelized transport keeps console traffic and telemetry physically separated
 
 ### Logger
-Purpose: format timestamped diagnostic messages and emit them over UART.
+Purpose: format and emit readable system diagnostics over the console UART.
 
 Internal design:
-- Uses `snprintf()` plus `vsnprintf()` into a static buffer.
-- Pulls time/date from the RTC before formatting.
-- Writes through the UART driver.
 
-Key details:
-- Log line format is `[HH:MM:SS] LEVEL message`.
-- Timestamping is present, but RTC time is reset to `00:00:00 01-Jan-2000` at each boot, so logs are boot-relative unless RTC retention/set logic is added.
-- Logger itself is not used from ISR paths in the current application.
+- uses `snprintf()` / `vsnprintf()` into a bounded buffer
+- prefixes messages with a timestamp and level
+- writes through `UART_Write()` on the console channel
 
-Embedded considerations:
-- Formatting is clean and bounded by a fixed buffer.
-- Output is blocking because UART TX is blocking.
-- Not currently protected for concurrent task use if FreeRTOS is enabled later.
+Important implementation details:
+
+- the logger no longer transmits directly through blocking HAL UART calls
+- logger output now rides on the UART driver console DMA TX path
+- the logger can fall back to boot-relative style timestamps during startup
+
+Embedded design considerations:
+
+- fixed-size formatting buffer prevents overflow
+- console logging is asynchronous at the UART transport layer
+- log ordering is preserved per write call, but long bursts can still fill the console TX ring buffer
 
 ### ADC Monitor
-Purpose: continuously monitor internal references and a battery sense channel.
+Purpose: continuously monitor internal health channels and battery sense voltage.
 
 Internal design:
-- ADC1 scans three channels: `VREFINT`, internal temperature sensor, and `ADC1_IN0` on `PA0`.
-- DMA runs in circular mode.
-- Completion callback copies the DMA buffer into a processing buffer.
-- Conversion helpers derive VDDA, MCU temperature, and scaled battery voltage.
 
-Key details:
-- Uses factory calibration constants from ST's ADC definitions.
-- Battery scaling assumes a 10k/10k divider, so reported battery voltage is doubled from the sensed node.
-- The implementation is aligned with the CubeMX scan order.
+- ADC1 scans:
+  - `VREFINT`
+  - internal temperature sensor
+  - battery input on `PA0`
+- DMA runs in circular mode
+- conversion-complete callback copies/updates the latest sample set
 
-Embedded considerations:
-- Good choice of DMA circular mode for low-CPU continuous monitoring.
-- ISR work is small and bounded.
-- Fresh-data tracking is incomplete: the module defines a `NOT_READY` state but currently never returns it, so callers can read stale/initial values.
+Key functions:
+
+- `ADC_Monitor_Init()`
+- `ADC_Monitor_Start()`
+- `ADC_Monitor_GetData()`
+- `ADC_Monitor_ConvCpltCallback()`
+
+Important implementation details:
+
+- uses factory calibration-based conversions
+- battery scaling assumes a `10k/10k` divider
+- sample updates are driven by DMA completion, not polling
 
 ### Command Parser
-Purpose: turn the UART byte stream into executable CLI commands.
+Purpose: consume CLI bytes from the console RX ring buffer, build lines, tokenize commands, and dispatch handlers.
 
 Internal design:
-- Drains bytes from the UART ring buffer.
-- Builds a line until `CR` or `LF`.
-- Tokenizes using `strtok()` with space delimiters.
-- Hands the token array to the command dispatcher.
 
-Key details:
-- Command buffer is 128 bytes.
-- Maximum token count is 5.
-- Unknown commands return `ERR: Unknown Command`.
+- bytes arrive through `USART2` RX interrupt
+- the parser drains the ring buffer in the main loop
+- lines are assembled until newline termination
+- arguments are tokenized with `strtok()`
 
-Embedded considerations:
-- Clean separation between line building and command dispatch.
-- Suitable for a superloop design.
-- The parser exists but is never called from the main loop, so the CLI is currently unreachable at runtime.
+Important implementation details:
+
+- parser is active in the current superloop
+- CLI is now reachable at runtime through the console UART
 
 ### Command System (`Command_List`)
-Purpose: provide table-driven command dispatch via function pointers.
-
-Internal design:
-- Static command table maps command names to handlers.
-- Parser performs a linear lookup on the command name and invokes the handler.
+Purpose: provide table-driven command dispatch through function pointers.
 
 Implemented commands:
-- `PING`: returns `PONG`.
-- `GET_ADC`: returns `VDDA`, `TEMP`, and `BATT` in text form.
-- `SET_RATE <value>`: currently only echoes the requested rate.
 
-Embedded considerations:
-- Good extensibility pattern for CLI growth.
-- Decouples parser mechanics from business logic.
-- `SET_RATE` is incomplete and currently unsafe on missing arguments.
+- `PING`
+- `GET_ADC`
+- `SET_RATE <value>`
+
+Important implementation details:
+
+- the parser and command table remain decoupled
+- handlers can call logger, ADC monitor, and other modules without parser changes
+
+### Ring Buffer
+Purpose: provide reusable FIFO infrastructure for both byte streams and fixed-size frame queues.
+
+Byte ring buffer features:
+
+- fixed capacity `RING_BUFFER_SIZE = 256`
+- usable byte capacity is `255`
+- used for:
+  - console RX bytes
+  - per-channel UART TX queues
+
+Frame queue features:
+
+- stores whole objects rather than bytes
+- used by telemetry to queue complete `TelemetryFrame_t` packets
+- `TELEM_QUEUE_SIZE = 9`, so usable queued frames are `8`
+
+Important implementation details:
+
+- `RingBuffer_PushArray()` now pre-checks space before writing
+- `RingBuffer_PopArray()` correctly drains available data into a caller buffer
+- `FrameQueue_Push()` / `FrameQueue_Pop()` copy whole telemetry frames in and out
 
 ## 4. Command Interface
 Input format:
-- Commands are ASCII text, space-delimited, terminated by `\r`, `\n`, or both.
-- Matching is case-sensitive; implemented command names are uppercase.
+
+- ASCII commands over `USART2`
+- space-delimited tokens
+- terminated by `\r`, `\n`, or both
 
 Output format:
-- Success and error responses are plain UART text with CR/LF line endings in most cases.
-- `GET_ADC` emits: `VDDA=<volts>, TEMP=<degC>, BATT=<volts>`
 
-Implemented commands:
-- `PING`: connectivity check.
-- `GET_ADC`: reports converted ADC health values.
-- `SET_RATE <int>`: placeholder for future telemetry/logging rate control.
+- readable text responses on `USART2`
+- logger and command replies share the same console UART
+
+Current commands:
+
+- `PING`: connectivity check
+- `GET_ADC`: prints `VDDA`, `TEMP`, and `BATT`
+- `SET_RATE <int>`: placeholder configuration command
 
 ## 5. Peripheral Configuration
-- ADC1: 12-bit, scan mode, 3 conversions, continuous conversion, circular DMA on `DMA2_Stream0`; channels are `VREFINT`, temperature sensor, and `PA0`.
-- USART1: 57600 baud, TX/RX with DMA configured; this looks like the intended telemetry port.
-- USART2: 115200 baud, TX/RX with IRQ enabled; this is the actively used CLI/log port.
-- SPI1: master, mode 0, software NSS, prescaler 32, DMA streams configured.
-- I2C1: 400 kHz fast mode on `PB8/PB9`, RX DMA configured.
-- SDIO: 1-bit bus mode on `PB2/PC8/PD2`.
-- RTC: LSE-backed calendar enabled.
-- GPIO: `PA5` heartbeat LED, `PB0` SD chip select, `PB1` sensor power enable, `PC9` SD detect input, `PC13` user button EXTI.
-- IOC also defines `PC5` as `LORA_CS`, but that pin is not yet reflected in generated GPIO code.
+
+- `USART2`: `115200`, CLI/logger text, RX interrupt, DMA TX required
+- `USART1`: `57600`, binary telemetry, DMA TX configured
+- `ADC1`: scan mode, continuous conversion, circular DMA on `DMA2_Stream0`
+- `SPI1`: initialized with DMA scaffolding
+- `I2C1`: initialized with RX DMA scaffolding
+- `RTC`: enabled, but timestamps are still startup/default-time biased
 
 ## 6. Data Flow Explanation
-Primary CLI path:
-`USART2 RX IRQ -> HAL UART callback -> UART_Driver callback -> Ring_Buffer push -> CommandParser_Process() -> line buffer -> strtok() -> command table -> handler -> UART reply`
 
-ADC query path:
-`ADC1 + DMA -> DMA complete IRQ -> ADC_Monitor callback -> processing buffer -> ADC_Monitor_GetData() -> GET_ADC response`
+Console path:
 
-Planned telemetry path:
-`status source -> Telemetry_SendSystemStatus() -> CRC calculation -> USART DMA transmit`
+`USART2 RX IRQ -> HAL_UART_RxCpltCallback() -> UART_RxCpltCallback() -> RX ring buffer -> CommandParser_Process() -> command handler -> Logger/UART_Write() -> USART2 DMA TX`
+
+Telemetry path:
+
+`Telemetry_SendSystemStatus() / Telemetry_QueuePacket() -> Telemetry_BuildFrame() -> FrameQueue_Push() -> Telemetry_Process() -> UART_WriteChannel(UART_DRIVER_CHANNEL_TELEMETRY, ...) -> USART1 DMA TX`
+
+ADC path:
+
+`ADC1 -> DMA circular buffer -> HAL_ADC_ConvCpltCallback() -> ADC monitor update -> CLI/log query`
 
 ## 7. Design Decisions
-- Interrupts for UART RX: correct choice for responsive console input without polling latency.
-- DMA for ADC: correct choice for continuous low-overhead health monitoring.
-- Command table: scalable and maintainable compared with large `if/else` parser chains.
-- Superloop vs RTOS: the codebase is conceptually still superloop-first, but FreeRTOS scaffolding has already been generated. Right now the scheduler is disabled, so runtime behavior is effectively bare-metal.
+
+- interrupt RX on `USART2` keeps CLI input responsive with minimal ISR work
+- DMA TX is used to avoid blocking console/telemetry transmits in the superloop
+- separate UART channels prevent binary telemetry from corrupting the human-readable console
+- a command table keeps CLI growth manageable
+- a superloop remains the execution model for now; no RTOS scheduler is active
 
 ## 8. Current System Status
-- Fully implemented at source level: USART2 RX buffering, ring buffer, logger formatting, ADC conversion pipeline, command parser, command table, telemetry frame builder.
-- Partially implemented or partially integrated: SPI bus wrapper, I2C bus wrapper, OLED driver, telemetry transport usage, FatFs/SDIO stack, FreeRTOS task model.
-- Not functionally wired into the current runtime: command processing, telemetry transmission, watchdog servicing through tasks, SD card operations, most non-UART peripheral abstractions.
+
+Fully working at source/runtime integration level:
+
+- console UART RX on `USART2`
+- non-blocking DMA TX on both UART channels
+- logger output on `USART2`
+- telemetry frame queueing and binary TX on `USART1`
+- ADC monitoring with DMA
+- command parser and command dispatch in the main loop
+- watchdog refresh in the main loop
+
+Partially implemented or still early-stage:
+
+- SPI bus validation
+- I2C feature-level validation
+- SD card / FatFs runtime integration
+- richer telemetry payloads and scheduling
+- OLED driver completeness
 
 ## 9. Known Limitations / Issues
-- The main loop is empty, so `CommandParser_Process()` is never called; the CLI framework is compiled in but unreachable.
-- The watchdog is enabled during initialization, but its refresh exists only inside the disabled FreeRTOS `TelemetryTask`; the current image will likely reset periodically after boot.
-- `ADC_Monitor_GetData()` never checks `data_ready`, so `ADC_MONITOR_NOT_READY` is effectively unused and stale/zero data can be returned.
-- `SET_RATE` prints an error for a missing argument but still dereferences `argv[1]`, which is undefined behavior.
-- UART TX and therefore logger output are blocking; this is acceptable for early bring-up but not ideal for deterministic flight-style telemetry/logging.
-- RTC timestamping exists, but RTC time is reinitialized on every boot, so timestamps are not persistent or mission-meaningful yet.
-- FatFs time support is stubbed with `get_fattime() = 0`, so filesystem timestamps are invalid.
-- The generated SD disk layer assumes the RTOS kernel is running; with the scheduler disabled, SD/FatFs integration is not ready for use.
-- The SPI wrapper header and source disagree on the `TransmitReceive` function name/signature, indicating that the SPI abstraction is not yet validated.
-- `OLED_WriteString()` is declared but not implemented.
+
+- `Telemetry_Init()` still carries an unused UART parameter for API compatibility; that should be removed in a cleanup pass
+- `Telemetry_OnTxComplete()` and `Telemetry_OnError()` are retained as no-op stubs from the older transport design
+- logger timestamp semantics are still imperfect because RTC startup/default-time handling is not fully resolved
+- `SET_RATE` remains a placeholder command
+- ring buffers are fixed-size, so sustained bursts beyond available queue space still return an error instead of blocking
+- no RTOS-aware locking exists yet around logger/UART usage beyond interrupt masking
 
 ## 10. Future Work / Roadmap
-- Validate the SPI bus abstraction end-to-end.
-- Implement and verify the SX1278 LoRa driver, likely using SPI1 and the planned `LORA_CS` pin.
-- Complete SD card + FatFs integration and add mount/read/write test coverage.
-- Connect the telemetry module to real producers and a scheduled transmit policy.
-- Add watchdog servicing strategy plus fault logging and reset-cause reporting.
-- Decide on a clean FreeRTOS migration path or keep the design intentionally superloop-based.
-- Improve error propagation and status reporting across all drivers.
-- Expand the CLI with `HELP`, status, peripheral test, time-setting, and configuration commands.
+
+- remove stale telemetry transport parameters/callback stubs
+- validate and expand telemetry packet types
+- add CLI commands for telemetry status, RTC set/read, and fault reporting
+- validate SPI-based radio integration
+- complete SD card + FatFs support
+- add watchdog fault reporting and reset-cause diagnostics
+- decide whether to remain superloop-based or migrate cleanly to FreeRTOS
 
 ## 11. Code Quality Assessment
-- Modularity: strong. The `App` / `Hardware` / `Utils` / `Core` split is appropriate and easy for a new engineer to navigate.
-- Scalability: promising. The command table, telemetry framing, and driver wrappers support incremental growth.
-- Safety: mixed. ISR work is minimal where it matters, but blocking TX, incomplete watchdog integration, and weak readiness/error handling reduce runtime robustness.
-- Embedded best practices: generally solid choices are visible, especially DMA ADC, IRQ RX buffering, use of fixed buffers, and limited ISR logic. The next step is integration discipline, not a rewrite.
+
+- Modularity: good. The UART split and channelized transport preserve clean module boundaries.
+- Scalability: improved. Multiple logical UART channels now fit naturally without pushing HAL details into application modules.
+- Safety: improved. TX no longer blocks, ISR work remains short, and telemetry is isolated from the console path.
+- Embedded best practices: solid direction. DMA TX, interrupt RX, fixed buffers, and explicit driver ownership of callback state are good architectural choices.
 
 ## 12. Suggested Improvements
-- Add an explicit application scheduler in the superloop: command parser servicing, periodic telemetry, watchdog refresh, and health polling.
-- Convert UART TX to an interrupt- or DMA-driven queued backend.
-- Make logger backend-aware and protect it for future multi-tasked use.
-- Enforce ADC freshness semantics and return `NOT_READY` until the first completed DMA sequence.
-- Harden command validation and give each command a clear success/error contract.
-- Preserve RTC state across resets or add a command/API to set time.
-- Add hardware bring-up tests for SPI, I2C, SDIO, and telemetry.
-- Document port ownership clearly: `USART2` for CLI/logging, `USART1` for telemetry, SPI1 for radio/storage expansion.
+
+- remove deprecated telemetry transport API pieces after call sites are cleaned up
+- document UART channel usage directly in code comments near initialization
+- add explicit queue depth and dropped-write diagnostics for both UART channels
+- consider a small RTOS-safe lock strategy if multi-tasked logging/telemetry is added later
+- tighten logger timestamp policy so logs stay clearly boot-relative until RTC is explicitly set
