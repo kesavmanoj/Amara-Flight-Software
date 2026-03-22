@@ -129,15 +129,17 @@ int main(void)
   ADC_Monitor_Status_t adc_start_status = ADC_Monitor_Start();
   Telemetry_Init(&hcrc);
   bool boot_telem_status = Telemetry_SendSystemStatus(0x01U);
+  bool boot_event_status = Telemetry_SendEvent(TELEM_EVENT_BOOT, HAL_GetTick());
 
   Logger_Info("Initialization Complete");
   Logger_Info("CLI/Logger UART=USART2 @115200, Telemetry UART=USART1 @57600");
-  Logger_Info("Startup status: UART=%d TELEM_UART=%d ADC_INIT=%d ADC_START=%d TELEM_BOOT_QUEUE=%d",
+  Logger_Info("Startup status: UART=%d TELEM_UART=%d ADC_INIT=%d ADC_START=%d TELEM_BOOT_QUEUE=%d BOOT_EVT_QUEUE=%d",
 		  uart_status,
 		  telem_uart_status,
 		  adc_init_status,
 		  adc_start_status,
-		  boot_telem_status ? 1 : 0);
+		  boot_telem_status ? 1 : 0,
+		  boot_event_status ? 1 : 0);
 
 
   /* USER CODE END 2 */
@@ -185,9 +187,11 @@ int main(void)
 	}
 
 	if((now - last_telem_report_ms) >= 3000U){
+		bool heartbeat_queued = Telemetry_SendHeartbeat();
 		Logger_Info("Telemetry UART DMA counters: tx_complete=%lu tx_error=%lu",
 				(unsigned long)g_telem_tx_complete_count,
 				(unsigned long)g_telem_error_count);
+		Logger_Info("Telemetry heartbeat queue: queued=%d", heartbeat_queued ? 1 : 0);
 		last_telem_report_ms = now;
 	}
 
@@ -207,7 +211,9 @@ int main(void)
 					adc_data.battery_voltage);
 			Logger_Info("ADC telemetry queue: queued=%d", adc_telem_queued ? 1 : 0);
 		} else {
+			bool adc_error_event = Telemetry_SendEvent(TELEM_EVENT_ADC_READ_ERROR, (uint32_t)adc_status);
 			Logger_Warn("ADC health read failed: status=%d", adc_status);
+			Logger_Warn("ADC error event queue: queued=%d", adc_error_event ? 1 : 0);
 		}
 
 		last_adc_report_ms = now;

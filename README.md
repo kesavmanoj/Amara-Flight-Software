@@ -253,8 +253,6 @@ Partially implemented or still early-stage:
 
 ## 10. Future Work / Roadmap
 
-- remove stale telemetry transport parameters/callback stubs
-- validate and expand telemetry packet types
 - add CLI commands for telemetry status, RTC set/read, and fault reporting
 - validate SPI-based radio integration
 - complete SD card + FatFs support

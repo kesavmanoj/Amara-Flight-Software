@@ -10,6 +10,19 @@
 #include "UART_Driver.h"
 #include <string.h>
 
+_Static_assert(((sizeof(TelemetryFrame_t) - sizeof(uint32_t)) % 4U) == 0U,
+		"Telemetry frame CRC region must stay 32-bit aligned");
+_Static_assert(sizeof(TelemetrySystemStatusPayload_t) <= TELEM_PAYLOAD_SIZE,
+		"System status payload exceeds telemetry payload size");
+_Static_assert(sizeof(TelemetryADCHealthPayload_t) <= TELEM_PAYLOAD_SIZE,
+		"ADC health payload exceeds telemetry payload size");
+_Static_assert(sizeof(TelemetryEventPayload_t) <= TELEM_PAYLOAD_SIZE,
+		"Event payload exceeds telemetry payload size");
+_Static_assert(sizeof(TelemetryHeartbeatPayload_t) <= TELEM_PAYLOAD_SIZE,
+		"Heartbeat payload exceeds telemetry payload size");
+_Static_assert(sizeof(TelemetryCommandAckPayload_t) <= TELEM_PAYLOAD_SIZE,
+		"Command ACK payload exceeds telemetry payload size");
+
 static CRC_HandleTypeDef *pCrc = NULL;
 
 static TelemetryFrame_t frame_buffer[TELEM_QUEUE_SIZE];
@@ -17,6 +30,20 @@ static TelemetryFrame_t tx_frame;
 static FrameQueue_t telem_queue;
 
 static bool frame_pending = false;
+
+static bool Telemetry_IsValidPacketId(TelemetryPacketID_t id)
+{
+	switch(id){
+	case TELEM_ID_SYSTEM_STATUS:
+	case TELEM_ID_ADC_HEALTH:
+	case TELEM_ID_EVENT:
+	case TELEM_ID_HEARTBEAT:
+	case TELEM_ID_COMMAND_ACK:
+		return true;
+	default:
+		return false;
+	}
+}
 
 static void Telemetry_BuildFrame(TelemetryFrame_t *frame, TelemetryPacketID_t id, uint8_t *payload, uint16_t len){
 
@@ -55,6 +82,8 @@ void Telemetry_Init(CRC_HandleTypeDef *hcrc){
 bool Telemetry_QueuePacket(TelemetryPacketID_t id, uint8_t* payload, uint16_t len){
 
 	if(pCrc == NULL) return false;
+	if(!Telemetry_IsValidPacketId(id)) return false;
+	if((payload == NULL) && (len > 0U)) return false;
 	if(len > TELEM_PAYLOAD_SIZE) return false;
 
 	TelemetryFrame_t frame;
@@ -117,7 +146,7 @@ bool Telemetry_SendADCHealth(float vdda_voltage, float battery_voltage, float mc
     );
 }
 
-bool Telemetry_SendEvent(uint8_t event_code, uint32_t event_value)
+bool Telemetry_SendEvent(TelemetryEventCode_t event_code, uint32_t event_value)
 {
     TelemetryEventPayload_t payload;
 
@@ -130,6 +159,46 @@ bool Telemetry_SendEvent(uint8_t event_code, uint32_t event_value)
 
     return Telemetry_QueuePacket(
         TELEM_ID_EVENT,
+        (uint8_t *)&payload,
+        sizeof(payload)
+    );
+}
+
+bool Telemetry_SendHeartbeat(void)
+{
+    TelemetryHeartbeatPayload_t payload;
+
+    if(sizeof(payload) > TELEM_PAYLOAD_SIZE){
+        return false;
+    }
+
+    payload.uptime_ms = HAL_GetTick();
+    payload.queue_depth = FrameQueue_Count(&telem_queue);
+    payload.frame_pending = frame_pending ? 1U : 0U;
+    payload.reserved = 0U;
+
+    return Telemetry_QueuePacket(
+        TELEM_ID_HEARTBEAT,
+        (uint8_t *)&payload,
+        sizeof(payload)
+    );
+}
+
+bool Telemetry_SendCommandAck(uint8_t command_id, int8_t status_code, uint32_t argument)
+{
+    TelemetryCommandAckPayload_t payload;
+
+    if(sizeof(payload) > TELEM_PAYLOAD_SIZE){
+        return false;
+    }
+
+    payload.command_id = command_id;
+    payload.status_code = status_code;
+    payload.reserved = 0U;
+    payload.argument = argument;
+
+    return Telemetry_QueuePacket(
+        TELEM_ID_COMMAND_ACK,
         (uint8_t *)&payload,
         sizeof(payload)
     );
