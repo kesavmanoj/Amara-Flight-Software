@@ -42,6 +42,7 @@
 #include "Ring_Buffer.h"
 #include "UART_Driver.h"
 #include "Command_Parser.h"
+#include "OLED_Display.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -122,24 +123,37 @@ int main(void)
   MX_FATFS_Init();
   /* USER CODE BEGIN 2 */
 
-  UART_Driver_Status_t uart_status = UART_Driver_Init(&huart2);
-  UART_Driver_Status_t telem_uart_status = UART_Driver_InitChannel(UART_DRIVER_CHANNEL_TELEMETRY, &huart1);
-  CommandParser_Init();
-  ADC_Monitor_Status_t adc_init_status = ADC_Monitor_Init(&hadc1);
-  ADC_Monitor_Status_t adc_start_status = ADC_Monitor_Start();
-  Telemetry_Init(&hcrc);
-  bool boot_telem_status = Telemetry_SendSystemStatus(0x01U);
-  bool boot_event_status = Telemetry_SendEvent(TELEM_EVENT_BOOT, HAL_GetTick());
+  // UART_Driver_Status_t uart_status = UART_Driver_Init(&huart2);
+  // UART_Driver_Status_t telem_uart_status = UART_Driver_InitChannel(UART_DRIVER_CHANNEL_TELEMETRY, &huart1);
+  // CommandParser_Init();
+  // ADC_Monitor_Status_t adc_init_status = ADC_Monitor_Init(&hadc1);
+  // ADC_Monitor_Status_t adc_start_status = ADC_Monitor_Start();
+  // Telemetry_Init(&hcrc);
+  // bool boot_telem_status = Telemetry_SendSystemStatus(0x01U);
+  // bool boot_event_status = Telemetry_SendEvent(TELEM_EVENT_BOOT, HAL_GetTick());
 
-  Logger_Info("Initialization Complete");
-  Logger_Info("CLI/Logger UART=USART2 @115200, Telemetry UART=USART1 @57600");
-  Logger_Info("Startup status: UART=%d TELEM_UART=%d ADC_INIT=%d ADC_START=%d TELEM_BOOT_QUEUE=%d BOOT_EVT_QUEUE=%d",
-		  uart_status,
-		  telem_uart_status,
-		  adc_init_status,
-		  adc_start_status,
-		  boot_telem_status ? 1 : 0,
-		  boot_event_status ? 1 : 0);
+  // Logger_Info("Initialization Complete");
+  // Logger_Info("CLI/Logger UART=USART2 @115200, Telemetry UART=USART1 @57600");
+  // Logger_Info("Startup status: UART=%d TELEM_UART=%d ADC_INIT=%d ADC_START=%d TELEM_BOOT_QUEUE=%d BOOT_EVT_QUEUE=%d",
+	// 	  uart_status,
+	// 	  telem_uart_status,
+	// 	  adc_init_status,
+	// 	  adc_start_status,
+	// 	  boot_telem_status ? 1 : 0,
+	// 	  boot_event_status ? 1 : 0);
+
+  static OLED_HandleTypeDef g_oled;
+
+  if (OLED_Init(&g_oled, &hi2c1, OLED_I2C_ADDR_0x3C) == OLED_STATUS_OK){
+
+    OLED_Clear(&g_oled);
+    OLED_SetCursor(&g_oled, 0U, 0U);
+    OLED_WriteString(&g_oled, "CubeSat FC", OLED_COLOR_WHITE);
+    OLED_SetCursor(&g_oled, 0U, 16U);
+    OLED_WriteString(&g_oled, "OLED OK", OLED_COLOR_WHITE);
+    OLED_UpdateScreen(&g_oled);
+
+  }
 
 
   /* USER CODE END 2 */
