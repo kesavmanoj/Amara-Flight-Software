@@ -13,8 +13,11 @@
 
 typedef enum {
 	SPI_DRIVER_OK = 0,
-	SPI_DRIVER_ERROR ,
-	SPI_DRIVER_BUSY
+	SPI_DRIVER_INVALID_PARAM,
+	SPI_DRIVER_NOT_INITIALIZED,
+	SPI_DRIVER_BUSY,
+	SPI_DRIVER_TIMEOUT,
+	SPI_DRIVER_ERROR
 } SPI_Driver_Status_t;
 
 typedef struct {
@@ -37,5 +40,6 @@ SPI_Driver_Status_t SPI_TransmitReceive(SPI_Device_t *dev, uint8_t *rx, uint8_t 
 
 // Single Byte Helper
 uint8_t SPI_TransferByte(SPI_Device_t *dev, uint8_t data);
+const char *SPI_Driver_StatusToString(SPI_Driver_Status_t status);
 
 #endif /* INC_SPI_BUS_H_ */

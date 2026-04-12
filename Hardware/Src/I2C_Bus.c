@@ -120,4 +120,19 @@ I2C_Status_t I2C_Bus_WriteRegister(I2C_Bus_Handle_t *bus, uint16_t devAddr, uint
 	return I2C_Bus_ConvertHalStatus(status);
 }
 
+const char *I2C_Bus_StatusToString(I2C_Status_t status)
+{
+	switch(status){
+	case I2C_OK:
+		return "OK";
+	case I2C_BUSY:
+		return "BUSY";
+	case I2C_TIMEOUT:
+		return "TIMEOUT";
+	case I2C_ERROR:
+	default:
+		return "ERROR";
+	}
+}
+
 

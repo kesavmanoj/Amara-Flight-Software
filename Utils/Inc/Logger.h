@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include "stm32f4xx_hal.h"
+#include "UART_Driver.h"
 
 // typedef enum {
 // 	LOG_LEVEL_INFO,
@@ -19,11 +20,19 @@
 // 	LOG_LEVEL_NONE
 // } LogLevel_t;
 
+typedef struct {
+    uint32_t messages_attempted;
+    uint32_t messages_dropped;
+    UART_Driver_Status_t last_uart_status;
+} Logger_Stats_t;
 
+void Get_Timestamp(char* buf, size_t buf_size);
 
 void Logger_Info(const char *fmt, ...);
 void Logger_Warn(const char *fmt, ...);
 void Logger_Error(const char *fmt, ...);
+uint32_t Logger_GetDroppedCount(void);
+void Logger_GetStats(Logger_Stats_t *stats);
 
 
 

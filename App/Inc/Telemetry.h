@@ -13,11 +13,24 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+
 #define TELEM_SYNC_WORD    0x55AA
 /* Keep the non-CRC portion of TelemetryFrame_t 4-byte aligned for HAL_CRC_Calculate(). */
 #define TELEM_PAYLOAD_SIZE 61
 /* Circular queue capacity; usable frame slots are TELEM_QUEUE_SIZE - 1. */
 #define TELEM_QUEUE_SIZE   9
+#define TELEM_TIMESTAMP_EPOCH_YEAR 2000U
+
+typedef enum {
+    TELEM_STATUS_OK = 0,
+    TELEM_STATUS_IDLE,
+    TELEM_STATUS_INVALID_PARAM,
+    TELEM_STATUS_NOT_INITIALIZED,
+    TELEM_STATUS_INVALID_PACKET_ID,
+    TELEM_STATUS_QUEUE_FULL,
+    TELEM_STATUS_TX_BUSY,
+    TELEM_STATUS_TRANSPORT_ERROR
+} Telemetry_Status_t;
 
 typedef enum {
     TELEM_ID_SYSTEM_STATUS = 0x01,
@@ -30,8 +43,15 @@ typedef enum {
 typedef enum {
     TELEM_EVENT_BOOT             = 0x01,
     TELEM_EVENT_ADC_READ_ERROR   = 0x02,
-    TELEM_EVENT_QUEUE_OVERFLOW   = 0x03
+    TELEM_EVENT_QUEUE_OVERFLOW   = 0x03,
+    TELEM_EVENT_COMMAND_UNKNOWN  = 0x04,
+    TELEM_EVENT_COMMAND_OVERFLOW = 0x05
 } TelemetryEventCode_t;
+
+typedef enum {
+    TELEM_TIMESTAMP_SOURCE_RTC = 0,
+    TELEM_TIMESTAMP_SOURCE_UPTIME_FALLBACK
+} TelemetryTimestampSource_t;
 
 typedef struct __attribute__((packed)) {
     uint8_t status_code;
@@ -65,25 +85,51 @@ typedef struct __attribute__((packed)) {
 
 typedef struct __attribute__((packed)) {
     uint16_t sync_word;
+    /* UTC-like seconds since 2000-01-01 00:00:00 when RTC is valid; otherwise uptime seconds fallback. */
     uint32_t timestamp;
     uint8_t  packet_id;
     uint8_t  payload[TELEM_PAYLOAD_SIZE];
     uint32_t crc;
 } TelemetryFrame_t;
 
+typedef struct {
+    uint16_t queue_depth;
+    uint16_t queue_capacity;
+    uint16_t max_queue_depth;
+    uint32_t queued_frames;
+    uint32_t sent_frames;
+    uint32_t dropped_frames;
+    uint32_t tx_busy_retries;
+    uint32_t transport_errors;
+    uint32_t rtc_fallback_count;
+    uint8_t frame_pending;
+    Telemetry_Status_t last_enqueue_status;
+    Telemetry_Status_t last_process_status;
+    TelemetryTimestampSource_t last_timestamp_source;
+} TelemetryStats_t;
+
 // API Functions
 
 void Telemetry_Init(CRC_HandleTypeDef *hcrc);
 
+Telemetry_Status_t Telemetry_QueuePacketEx(TelemetryPacketID_t id, uint8_t *payload, uint16_t len);
 bool Telemetry_QueuePacket(TelemetryPacketID_t id, uint8_t *payload, uint16_t len);
 
 void Telemetry_Process(void);
+Telemetry_Status_t Telemetry_ProcessStep(void);
 
+Telemetry_Status_t Telemetry_SendSystemStatusEx(uint8_t status);
+Telemetry_Status_t Telemetry_SendADCHealthEx(float vdda_voltage, float battery_voltage, float mcu_temp_c);
+Telemetry_Status_t Telemetry_SendEventEx(TelemetryEventCode_t event_code, uint32_t event_value);
+Telemetry_Status_t Telemetry_SendHeartbeatEx(void);
+Telemetry_Status_t Telemetry_SendCommandAckEx(uint8_t command_id, int8_t status_code, uint32_t argument);
 bool Telemetry_SendSystemStatus(uint8_t status);
 bool Telemetry_SendADCHealth(float vdda_voltage, float battery_voltage, float mcu_temp_c);
 bool Telemetry_SendEvent(TelemetryEventCode_t event_code, uint32_t event_value);
 bool Telemetry_SendHeartbeat(void);
 bool Telemetry_SendCommandAck(uint8_t command_id, int8_t status_code, uint32_t argument);
+void Telemetry_GetStats(TelemetryStats_t *stats);
+const char *Telemetry_StatusToString(Telemetry_Status_t status);
 
 
 #endif /* INC_TELEMETRY_H_ */

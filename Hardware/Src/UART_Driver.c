@@ -147,7 +147,7 @@ UART_Driver_Status_t UART_Driver_Init(UART_HandleTypeDef *huart){
 UART_Driver_Status_t UART_Driver_InitChannel(UART_Driver_Channel_t channel, UART_HandleTypeDef *huart){
 	UART_ChannelState_t *state = UART_GetChannel(channel);
 
-	if((state == NULL) || (huart == NULL)) return UART_DRIVER_ERROR;
+	if((state == NULL) || (huart == NULL)) return UART_DRIVER_INVALID_PARAM;
 
 	RingBuffer_Init(&state->tx_buffer);
 	state->huart = huart;
@@ -182,13 +182,15 @@ UART_Driver_Status_t UART_WriteChannel(UART_Driver_Channel_t channel, uint8_t *d
 	uint32_t primask;
 	UART_ChannelState_t *state = UART_GetChannel(channel);
 
-	if((state == NULL) || (state->huart == NULL) || (data == NULL) || (len == 0U)) return UART_DRIVER_ERROR;
+	if(state == NULL) return UART_DRIVER_INVALID_PARAM;
+	if(state->huart == NULL) return UART_DRIVER_NOT_INITIALIZED;
+	if((data == NULL) || (len == 0U)) return UART_DRIVER_INVALID_PARAM;
 
 	/* Buffer handling stays inside the UART driver so higher layers remain non-blocking. */
 	primask = UART_EnterCritical();
 	if(!RingBuffer_PushArray(&state->tx_buffer, data, len)){
 		UART_ExitCritical(primask);
-		return UART_DRIVER_ERROR;
+		return UART_DRIVER_BUFFER_FULL;
 	}
 	UART_ExitCritical(primask);
 
@@ -198,9 +200,28 @@ UART_Driver_Status_t UART_WriteChannel(UART_Driver_Channel_t channel, uint8_t *d
 }
 
 UART_Driver_Status_t UART_WriteString(const char *str){
-	if(str == NULL) return UART_DRIVER_ERROR;
+	if(str == NULL) return UART_DRIVER_INVALID_PARAM;
 
 	return UART_Write((uint8_t *)str, (uint16_t)strlen(str));
+}
+
+const char *UART_Driver_StatusToString(UART_Driver_Status_t status)
+{
+	switch(status){
+	case UART_DRIVER_OK:
+		return "OK";
+	case UART_DRIVER_INVALID_PARAM:
+		return "INVALID_PARAM";
+	case UART_DRIVER_NOT_INITIALIZED:
+		return "NOT_INITIALIZED";
+	case UART_DRIVER_BUFFER_FULL:
+		return "BUFFER_FULL";
+	case UART_DRIVER_BUSY:
+		return "BUSY";
+	case UART_DRIVER_ERROR:
+	default:
+		return "ERROR";
+	}
 }
 
 // IRQ Handler
@@ -260,7 +281,6 @@ void UART_ErrorCallback(UART_HandleTypeDef *huart)
 
 	UART_StartTxDMA(state);
 }
-
 
 
 

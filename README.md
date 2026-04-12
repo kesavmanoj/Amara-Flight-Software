@@ -17,6 +17,7 @@ The current firmware provides:
 - continuous ADC monitoring with DMA
 - a table-driven command system
 - binary telemetry frame generation with CRC on `USART1`
+- OLED bring-up on `I2C1` through the modular I2C bus wrapper
 
 ## Note
 Import the `.ioc` file into STM32CubeMX, regenerate code as needed, then build/flash with STM32CubeIDE.
@@ -69,6 +70,7 @@ Important implementation details:
 - `UART_StartTxDMA()` pops up to `128` bytes into a stable DMA buffer, then starts `HAL_UART_Transmit_DMA()`
 - if a DMA start fails, the staged chunk remains in the DMA buffer and is retried later
 - short critical sections disable interrupts while shared TX state is updated
+- driver-local status reporting now distinguishes invalid parameters, uninitialized channels, buffer-full conditions, and generic transport errors
 
 Embedded design considerations:
 
@@ -90,6 +92,7 @@ Important implementation details:
 - the logger no longer transmits directly through blocking HAL UART calls
 - logger output now rides on the UART driver console DMA TX path
 - the logger can fall back to boot-relative style timestamps during startup
+- logger stats now track attempted writes, dropped writes, and the last console UART status
 
 Embedded design considerations:
 
@@ -121,6 +124,7 @@ Important implementation details:
 - uses factory calibration-based conversions
 - battery scaling assumes a `10k/10k` divider
 - sample updates are driven by DMA completion, not polling
+- status reporting is explicit through `ADC_Monitor_Status_t` and helper string conversion for logs
 
 ### Command Parser
 Purpose: consume CLI bytes from the console RX ring buffer, build lines, tokenize commands, and dispatch handlers.
@@ -136,6 +140,8 @@ Important implementation details:
 
 - parser is active in the current superloop
 - CLI is now reachable at runtime through the console UART
+- command lines are trimmed for leading/trailing spaces and tokenized on spaces or tabs
+- malformed command cases now emit clearer console errors and telemetry fault events
 
 ### Command System (`Command_List`)
 Purpose: provide table-driven command dispatch through function pointers.
@@ -150,6 +156,34 @@ Important implementation details:
 
 - the parser and command table remain decoupled
 - handlers can call logger, ADC monitor, and other modules without parser changes
+- command handlers now emit binary command-ack telemetry packets alongside console responses where appropriate
+- response writes and ACK queue failures are logged explicitly so bench traces show both command and transport outcomes
+
+### Telemetry
+Purpose: frame binary status data on `USART1` so observability stays machine-readable and separate from the console.
+
+Current packet coverage:
+
+- `TELEM_ID_SYSTEM_STATUS`
+- `TELEM_ID_ADC_HEALTH`
+- `TELEM_ID_HEARTBEAT`
+- `TELEM_ID_EVENT`
+- `TELEM_ID_COMMAND_ACK`
+
+Timestamp policy:
+
+- `TelemetryFrame_t.timestamp` is a `uint32_t`
+- when RTC holds a non-default value, the field contains seconds since `2000-01-01 00:00:00`
+- when RTC is still at the CubeMX default epoch or an RTC read fails, the field falls back to uptime seconds
+- telemetry stats record whether the most recent frame used RTC time or uptime fallback
+
+Observability features:
+
+- queue depth, peak depth, queued/sent/dropped counters
+- retry accounting for telemetry TX backpressure
+- transport error counters
+- RTC fallback counters
+- last enqueue/process status snapshots for bench correlation
 
 ### Ring Buffer
 Purpose: provide reusable FIFO infrastructure for both byte streams and fixed-size frame queues.
@@ -190,7 +224,7 @@ Current commands:
 
 - `PING`: connectivity check
 - `GET_ADC`: prints `VDDA`, `TEMP`, and `BATT`
-- `SET_RATE <int>`: placeholder configuration command
+- `SET_RATE <int>`: validated example configuration command with argument checking
 
 ## 5. Peripheral Configuration
 
@@ -199,7 +233,7 @@ Current commands:
 - `ADC1`: scan mode, continuous conversion, circular DMA on `DMA2_Stream0`
 - `SPI1`: initialized with DMA scaffolding
 - `I2C1`: initialized with RX DMA scaffolding
-- `RTC`: enabled, but timestamps are still startup/default-time biased
+- `RTC`: enabled; telemetry frame timestamps now encode seconds since `2000-01-01 00:00:00`, with uptime-seconds fallback if RTC reads fail
 
 ## 6. Data Flow Explanation
 
@@ -234,6 +268,9 @@ Fully working at source/runtime integration level:
 - ADC monitoring with DMA
 - command parser and command dispatch in the main loop
 - watchdog refresh in the main loop
+- OLED initialization and screen updates on `I2C1`
+- startup status logging that reports UART, ADC, telemetry, I2C, and OLED bring-up state
+- telemetry and logger stats reporting that expose queue pressure, drops, retries, and timestamp-source fallback behavior
 
 Partially implemented or still early-stage:
 
@@ -245,12 +282,10 @@ Partially implemented or still early-stage:
 
 ## 9. Known Limitations / Issues
 
-- `Telemetry_Init()` still carries an unused UART parameter for API compatibility; that should be removed in a cleanup pass
-- `Telemetry_OnTxComplete()` and `Telemetry_OnError()` are retained as no-op stubs from the older transport design
-- logger timestamp semantics are still imperfect because RTC startup/default-time handling is not fully resolved
-- `SET_RATE` remains a placeholder command
+- RTC is still reset to the default epoch on boot in CubeMX-generated `rtc.c`, so both logger and telemetry fall back to boot-relative time until RTC is explicitly set
 - ring buffers are fixed-size, so sustained bursts beyond available queue space still return an error instead of blocking
 - no RTOS-aware locking exists yet around logger/UART usage beyond interrupt masking
+- SPI is wrapped and status-aware, but no mission device layer is using it yet
 
 ## 10. Future Work / Roadmap
 

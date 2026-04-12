@@ -12,8 +12,12 @@
 
 #define LOG_BUFFER_SIZE 256
 
+static volatile uint32_t g_logger_dropped_count = 0U;
+static volatile uint32_t g_logger_attempted_count = 0U;
+static volatile UART_Driver_Status_t g_logger_last_uart_status = UART_DRIVER_NOT_INITIALIZED;
+
 // Helper Functions
-static void Get_Timestamp(char* buf, size_t buf_size){
+void Get_Timestamp(char* buf, size_t buf_size){
 	RTC_TimeTypeDef sTime;
 	RTC_DateTypeDef sDate;
 
@@ -41,6 +45,7 @@ static void Logger_Log(const char *prefix, const char *fmt, va_list args)
 {
     char timestamp[24];
     char log_buffer[LOG_BUFFER_SIZE];
+    UART_Driver_Status_t uart_status;
 
     Get_Timestamp(timestamp, sizeof(timestamp));
 
@@ -78,7 +83,14 @@ static void Logger_Log(const char *prefix, const char *fmt, va_list args)
         len = LOG_BUFFER_SIZE;
 
     /* Transmit using UART driver */
-    UART_Write((uint8_t*)log_buffer, (uint16_t)len);
+    g_logger_attempted_count++;
+    uart_status = UART_Write((uint8_t*)log_buffer, (uint16_t)len);
+    g_logger_last_uart_status = uart_status;
+
+    if (uart_status != UART_DRIVER_OK)
+    {
+        g_logger_dropped_count++;
+    }
 }
 
 void Logger_Info(const char *fmt, ...){
@@ -102,5 +114,20 @@ void Logger_Error(const char *fmt, ...){
 	va_end(args);
 }
 
+uint32_t Logger_GetDroppedCount(void)
+{
+    return g_logger_dropped_count;
+}
 
+void Logger_GetStats(Logger_Stats_t *stats)
+{
+    if (stats == NULL)
+    {
+        return;
+    }
+
+    stats->messages_attempted = g_logger_attempted_count;
+    stats->messages_dropped = g_logger_dropped_count;
+    stats->last_uart_status = g_logger_last_uart_status;
+}
 

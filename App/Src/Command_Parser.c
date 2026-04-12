@@ -9,8 +9,9 @@
 #include "Command_Parser.h"
 #include "Command_List.h"
 
-#include "uart_driver.h"
-#include "logger.h"
+#include "UART_Driver.h"
+#include "Logger.h"
+#include "Telemetry.h"
 
 #include <string.h>
 
@@ -20,23 +21,39 @@
 static char cmd_buffer[CMD_BUFFER_SIZE];
 static uint16_t cmd_index = 0;
 
+static char *CommandParser_TrimWhitespace(char *input)
+{
+	char *end;
+
+	while((*input == ' ') || (*input == '\t')){
+		input++;
+	}
+
+	end = input + strlen(input);
+	while((end > input) && ((end[-1] == ' ') || (end[-1] == '\t'))){
+		end--;
+	}
+	*end = '\0';
+
+	return input;
+}
 
 static int tokenize(char *input, char *argv[], int max_tokens){
 	int argc = 0;
-	char *token = strtok(input, " ");
+	char *token = strtok(input, " \t");
 
 	while(token != NULL && argc < max_tokens){
 		argv[argc++] = token;
-		token = strtok(NULL, " ");
+		token = strtok(NULL, " \t");
 	}
 
 	return argc;
 }
 
 static void CommandParser_Execute(char* cmd_line){
-
+	char *normalized_line = CommandParser_TrimWhitespace(cmd_line);
 	char *argv[MAX_TOKENS];
-	int argc = tokenize(cmd_line, argv, MAX_TOKENS);
+	int argc = tokenize(normalized_line, argv, MAX_TOKENS);
 
 	if(argc == 0) return;
 
@@ -50,6 +67,8 @@ static void CommandParser_Execute(char* cmd_line){
 		}
 	}
 
+	Logger_Warn("Unknown command received: %s", argv[0]);
+	(void)Telemetry_SendEventEx(TELEM_EVENT_COMMAND_UNKNOWN, 0U);
 	UART_WriteString("ERR: Unknown Command\r\n");
 }
 
@@ -73,7 +92,9 @@ static void CommandParser_ProcessByte(uint8_t byte){
 	} else {
 		// Overflow error
 		cmd_index = 0;
-		Logger_Info("CMD Buffer overflow error");
+		Logger_Warn("Command buffer overflow");
+		(void)Telemetry_SendEventEx(TELEM_EVENT_COMMAND_OVERFLOW, CMD_BUFFER_SIZE);
+		UART_WriteString("ERR: Command Overflow\r\n");
 	}
 }
 

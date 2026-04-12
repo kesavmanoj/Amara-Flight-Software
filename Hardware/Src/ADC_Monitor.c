@@ -10,7 +10,7 @@ static ADC_HandleTypeDef *pAdc = NULL;
 static volatile uint16_t dma_buffer[ADC_CHANNELS_COUNT];
 
 /* Processing buffer (safe copy) */
-uint16_t proc_buffer[ADC_CHANNELS_COUNT];
+static uint16_t proc_buffer[ADC_CHANNELS_COUNT];
 
 /* Data ready flag (set in ISR context) */
 static volatile bool data_ready = false;
@@ -157,3 +157,17 @@ void ADC_Monitor_ConvCpltCallback(ADC_HandleTypeDef *hadc)
  * continues filling the buffer with new ADC data in the background and
  * the cycle repeats continuously.
  */
+
+const char *ADC_Monitor_StatusToString(ADC_Monitor_Status_t status)
+{
+    switch(status)
+    {
+        case ADC_MONITOR_OK:
+            return "OK";
+        case ADC_MONITOR_NOT_READY:
+            return "NOT_READY";
+        case ADC_MONITOR_ERROR:
+        default:
+            return "ERROR";
+    }
+}

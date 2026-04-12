@@ -37,5 +37,6 @@ I2C_Status_t I2C_Bus_WriteRegister(I2C_Bus_Handle_t *bus, uint16_t devAddr, uint
 
 I2C_Status_t I2C_Bus_ReadRegister (I2C_Bus_Handle_t *bus, uint16_t devAddr, uint16_t regAddr, 
 													uint8_t *pData, uint16_t len);
+const char *I2C_Bus_StatusToString(I2C_Status_t status);
 
 #endif /* INC_I2C_BUS_H_ */

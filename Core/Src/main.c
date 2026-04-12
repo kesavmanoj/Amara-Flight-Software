@@ -66,6 +66,8 @@
 /* USER CODE BEGIN PV */
 static volatile uint32_t g_telem_tx_complete_count = 0;
 static volatile uint32_t g_telem_error_count = 0;
+static I2C_Bus_Handle_t g_i2c1_bus;
+static OLED_HandleTypeDef g_oled;
 
 /* USER CODE END PV */
 
@@ -78,6 +80,17 @@ void MX_FREERTOS_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static const char *Main_TelemetryTimestampSourceToString(TelemetryTimestampSource_t source)
+{
+  switch (source)
+  {
+    case TELEM_TIMESTAMP_SOURCE_RTC:
+      return "RTC";
+    case TELEM_TIMESTAMP_SOURCE_UPTIME_FALLBACK:
+    default:
+      return "UPTIME_FALLBACK";
+  }
+}
 
 /* USER CODE END 0 */
 
@@ -124,31 +137,22 @@ int main(void)
   MX_FATFS_Init();
   /* USER CODE BEGIN 2 */
 
-  // UART_Driver_Status_t uart_status = UART_Driver_Init(&huart2);
-  // UART_Driver_Status_t telem_uart_status = UART_Driver_InitChannel(UART_DRIVER_CHANNEL_TELEMETRY, &huart1);
-  // CommandParser_Init();
-  // ADC_Monitor_Status_t adc_init_status = ADC_Monitor_Init(&hadc1);
-  // ADC_Monitor_Status_t adc_start_status = ADC_Monitor_Start();
-  // Telemetry_Init(&hcrc);
-  // bool boot_telem_status = Telemetry_SendSystemStatus(0x01U);
-  // bool boot_event_status = Telemetry_SendEvent(TELEM_EVENT_BOOT, HAL_GetTick());
+  UART_Driver_Status_t uart_status = UART_Driver_Init(&huart2);
+  UART_Driver_Status_t telem_uart_status = UART_Driver_InitChannel(UART_DRIVER_CHANNEL_TELEMETRY, &huart1);
+  CommandParser_Init();
+  ADC_Monitor_Status_t adc_init_status = ADC_Monitor_Init(&hadc1);
+  ADC_Monitor_Status_t adc_start_status = ADC_Monitor_Start();
+  Telemetry_Init(&hcrc);
+  Telemetry_Status_t boot_telem_status = Telemetry_SendSystemStatusEx(0x01U);
+  Telemetry_Status_t boot_event_status = Telemetry_SendEventEx(TELEM_EVENT_BOOT, HAL_GetTick());
 
-  // Logger_Info("Initialization Complete");
-  // Logger_Info("CLI/Logger UART=USART2 @115200, Telemetry UART=USART1 @57600");
-  // Logger_Info("Startup status: UART=%d TELEM_UART=%d ADC_INIT=%d ADC_START=%d TELEM_BOOT_QUEUE=%d BOOT_EVT_QUEUE=%d",
-	// 	  uart_status,
-	// 	  telem_uart_status,
-	// 	  adc_init_status,
-	// 	  adc_start_status,
-	// 	  boot_telem_status ? 1 : 0,
-	// 	  boot_event_status ? 1 : 0);
+  I2C_Status_t i2c_bus_status = I2C_Bus_Init(&g_i2c1_bus, &hi2c1);
+  OLED_Status_t oled_status = OLED_STATUS_INVALID_PARAM;
 
-  static I2C_Bus_Handle_t g_i2c1_bus;
-  static OLED_HandleTypeDef g_oled;
-
-  if (I2C_Bus_Init(&g_i2c1_bus, &hi2c1) == I2C_OK)
+  if (i2c_bus_status == I2C_OK)
   {
-    if (OLED_Init(&g_oled, &g_i2c1_bus, OLED_I2C_ADDR_0x3C) == OLED_STATUS_OK){
+    oled_status = OLED_Init(&g_oled, &g_i2c1_bus, OLED_I2C_ADDR_0x3C);
+    if (oled_status == OLED_STATUS_OK){
 
       OLED_Clear(&g_oled);
       OLED_SetCursor(&g_oled, 0U, 0U);
@@ -159,6 +163,18 @@ int main(void)
 
     }
   }
+
+  Logger_Info("Initialization Complete");
+  Logger_Info("CLI/Logger UART=USART2 @115200, Telemetry UART=USART1 @57600");
+  Logger_Info("Startup status: UART=%s TELEM_UART=%s ADC_INIT=%s ADC_START=%s TELEM_BOOT=%s BOOT_EVT=%s I2C=%s OLED=%d",
+		  UART_Driver_StatusToString(uart_status),
+		  UART_Driver_StatusToString(telem_uart_status),
+		  ADC_Monitor_StatusToString(adc_init_status),
+		  ADC_Monitor_StatusToString(adc_start_status),
+		  Telemetry_StatusToString(boot_telem_status),
+		  Telemetry_StatusToString(boot_event_status),
+		  I2C_Bus_StatusToString(i2c_bus_status),
+		  oled_status);
 
 
   /* USER CODE END 2 */
@@ -197,20 +213,42 @@ int main(void)
 
 	if((now - last_telem_queue_ms) >= 2000U){
 		uint8_t status_code = (uint8_t)(0x10U | (telemetry_status_counter & 0x0FU));
-		bool queued = Telemetry_SendSystemStatus(status_code);
-		Logger_Info("Telemetry queue attempt: queued=%d status=0x%02X",
-				queued ? 1 : 0,
+		Telemetry_Status_t queue_status = Telemetry_SendSystemStatusEx(status_code);
+		Logger_Info("Telemetry queue attempt: result=%s status=0x%02X",
+				Telemetry_StatusToString(queue_status),
 				status_code);
 		telemetry_status_counter++;
 		last_telem_queue_ms = now;
 	}
 
 	if((now - last_telem_report_ms) >= 3000U){
-		bool heartbeat_queued = Telemetry_SendHeartbeat();
+		TelemetryStats_t telem_stats;
+		Logger_Stats_t logger_stats;
+		Telemetry_Status_t heartbeat_status = Telemetry_SendHeartbeatEx();
+		Telemetry_GetStats(&telem_stats);
+		Logger_GetStats(&logger_stats);
 		Logger_Info("Telemetry UART DMA counters: tx_complete=%lu tx_error=%lu",
 				(unsigned long)g_telem_tx_complete_count,
 				(unsigned long)g_telem_error_count);
-		Logger_Info("Telemetry heartbeat queue: queued=%d", heartbeat_queued ? 1 : 0);
+		Logger_Info("Telemetry heartbeat queue: result=%s", Telemetry_StatusToString(heartbeat_status));
+		Logger_Info("Telemetry stats: depth=%u/%u peak=%u queued=%lu sent=%lu dropped=%lu tx_busy=%lu tx_err=%lu rtc_fallback=%lu pending=%u last_enq=%s last_proc=%s ts_src=%s",
+				(unsigned int)telem_stats.queue_depth,
+				(unsigned int)telem_stats.queue_capacity,
+				(unsigned int)telem_stats.max_queue_depth,
+				(unsigned long)telem_stats.queued_frames,
+				(unsigned long)telem_stats.sent_frames,
+				(unsigned long)telem_stats.dropped_frames,
+				(unsigned long)telem_stats.tx_busy_retries,
+				(unsigned long)telem_stats.transport_errors,
+				(unsigned long)telem_stats.rtc_fallback_count,
+				(unsigned int)telem_stats.frame_pending,
+				Telemetry_StatusToString(telem_stats.last_enqueue_status),
+				Telemetry_StatusToString(telem_stats.last_process_status),
+				Main_TelemetryTimestampSourceToString(telem_stats.last_timestamp_source));
+		Logger_Info("Logger stats: attempted=%lu dropped=%lu last_uart=%s",
+				(unsigned long)logger_stats.messages_attempted,
+				(unsigned long)logger_stats.messages_dropped,
+				UART_Driver_StatusToString(logger_stats.last_uart_status));
 		last_telem_report_ms = now;
 	}
 
@@ -219,7 +257,7 @@ int main(void)
 		ADC_Monitor_Status_t adc_status = ADC_Monitor_GetData(&adc_data);
 
 		if(adc_status == ADC_MONITOR_OK){
-			bool adc_telem_queued = Telemetry_SendADCHealth(
+			Telemetry_Status_t adc_telem_status = Telemetry_SendADCHealthEx(
 					adc_data.vdda_voltage,
 					adc_data.battery_voltage,
 					adc_data.mcu_temp_c);
@@ -228,11 +266,11 @@ int main(void)
 					adc_data.vdda_voltage,
 					adc_data.mcu_temp_c,
 					adc_data.battery_voltage);
-			Logger_Info("ADC telemetry queue: queued=%d", adc_telem_queued ? 1 : 0);
+			Logger_Info("ADC telemetry queue: result=%s", Telemetry_StatusToString(adc_telem_status));
 		} else {
-			bool adc_error_event = Telemetry_SendEvent(TELEM_EVENT_ADC_READ_ERROR, (uint32_t)adc_status);
-			Logger_Warn("ADC health read failed: status=%d", adc_status);
-			Logger_Warn("ADC error event queue: queued=%d", adc_error_event ? 1 : 0);
+			Telemetry_Status_t adc_error_event = Telemetry_SendEventEx(TELEM_EVENT_ADC_READ_ERROR, (uint32_t)adc_status);
+			Logger_Warn("ADC health read failed: status=%s(%d)", ADC_Monitor_StatusToString(adc_status), adc_status);
+			Logger_Warn("ADC error event queue: result=%s", Telemetry_StatusToString(adc_error_event));
 		}
 
 		last_adc_report_ms = now;

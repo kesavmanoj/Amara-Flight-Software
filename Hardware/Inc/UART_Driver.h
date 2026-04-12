@@ -16,6 +16,10 @@
 
 typedef enum {
 	UART_DRIVER_OK = 0,
+	UART_DRIVER_INVALID_PARAM,
+	UART_DRIVER_NOT_INITIALIZED,
+	UART_DRIVER_BUFFER_FULL,
+	UART_DRIVER_BUSY,
 	UART_DRIVER_ERROR
 } UART_Driver_Status_t;
 
@@ -36,6 +40,7 @@ uint16_t UART_Available(void);
 UART_Driver_Status_t UART_Write(uint8_t *data, uint16_t len);
 UART_Driver_Status_t UART_WriteString(const char *str);
 UART_Driver_Status_t UART_WriteChannel(UART_Driver_Channel_t channel, uint8_t *data, uint16_t len);
+const char *UART_Driver_StatusToString(UART_Driver_Status_t status);
 
 // IRQ Handlers
 void UART_RxCpltCallback(UART_HandleTypeDef *huart);
