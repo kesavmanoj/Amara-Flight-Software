@@ -12,12 +12,12 @@
 #include <stdarg.h>
 #include "stm32f4xx_hal.h"
 
-typedef enum {
-	LOG_LEVEL_INFO,
-	LOG_LEVEL_WARN,
-	LOG_LEVEL_ERROR,
-	LOG_LEVEL_NONE
-} LogLevel_t;
+// typedef enum {
+// 	LOG_LEVEL_INFO,
+// 	LOG_LEVEL_WARN,
+// 	LOG_LEVEL_ERROR,
+// 	LOG_LEVEL_NONE
+// } LogLevel_t;
 
 
 

@@ -88,11 +88,28 @@ ADC_Monitor_Status_t ADC_Monitor_Start(void)
     return ADC_MONITOR_OK;
 }
 
+ADC_Monitor_Status_t ADC_Monitor_Stop(void)
+{
+    if (pAdc == NULL)
+        return ADC_MONITOR_ERROR;
+
+    if (HAL_ADC_Stop_DMA(pAdc) != HAL_OK)
+        return ADC_MONITOR_ERROR;
+
+    data_ready = false;
+
+    return ADC_MONITOR_OK;
+}
+
 ADC_Monitor_Status_t ADC_Monitor_GetData(ADC_HealthData_t *data)
 {
     if (data == NULL)
         return ADC_MONITOR_ERROR;
 
+    if(data_ready == false){
+        return ADC_MONITOR_NOT_READY;
+    }
+    
     data_ready = false;
 
     /* Atomic snapshot (already safe due to buffer copy in ISR) */

@@ -42,6 +42,7 @@
 #include "Ring_Buffer.h"
 #include "UART_Driver.h"
 #include "Command_Parser.h"
+#include "I2C_Bus.h"
 #include "OLED_Display.h"
 /* USER CODE END Includes */
 
@@ -142,17 +143,21 @@ int main(void)
 	// 	  boot_telem_status ? 1 : 0,
 	// 	  boot_event_status ? 1 : 0);
 
+  static I2C_Bus_Handle_t g_i2c1_bus;
   static OLED_HandleTypeDef g_oled;
 
-  if (OLED_Init(&g_oled, &hi2c1, OLED_I2C_ADDR_0x3C) == OLED_STATUS_OK){
+  if (I2C_Bus_Init(&g_i2c1_bus, &hi2c1) == I2C_OK)
+  {
+    if (OLED_Init(&g_oled, &g_i2c1_bus, OLED_I2C_ADDR_0x3C) == OLED_STATUS_OK){
 
-    OLED_Clear(&g_oled);
-    OLED_SetCursor(&g_oled, 0U, 0U);
-    OLED_WriteString(&g_oled, "CubeSat FC", OLED_COLOR_WHITE);
-    OLED_SetCursor(&g_oled, 0U, 16U);
-    OLED_WriteString(&g_oled, "OLED OK", OLED_COLOR_WHITE);
-    OLED_UpdateScreen(&g_oled);
+      OLED_Clear(&g_oled);
+      OLED_SetCursor(&g_oled, 0U, 0U);
+      OLED_WriteString(&g_oled, "CubeSat FC", OLED_COLOR_WHITE);
+      OLED_SetCursor(&g_oled, 0U, 16U);
+      OLED_WriteString(&g_oled, "OLED OK", OLED_COLOR_WHITE);
+      OLED_UpdateScreen(&g_oled);
 
+    }
   }
 
 

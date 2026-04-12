@@ -11,7 +11,7 @@
 #ifndef INC_OLED_DISPLAY_H_
 #define INC_OLED_DISPLAY_H_
 
-#include "stm32f4xx_hal.h"
+#include "I2C_Bus.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -50,7 +50,7 @@ typedef enum
 
 typedef struct
 {
-    I2C_HandleTypeDef *hi2c;
+    I2C_Bus_Handle_t *bus;
     uint8_t i2c_addr_7bit;
     uint8_t width;
     uint8_t height;
@@ -64,7 +64,7 @@ typedef struct
 } OLED_HandleTypeDef;
 
 OLED_Status_t OLED_Init(OLED_HandleTypeDef *oled,
-                        I2C_HandleTypeDef *hi2c,
+                        I2C_Bus_Handle_t *bus,
                         uint8_t i2c_addr_7bit);
 
 OLED_Status_t OLED_WriteCommand(OLED_HandleTypeDef *oled, uint8_t command);

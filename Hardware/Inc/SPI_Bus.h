@@ -32,8 +32,8 @@ void SPI_CS_Low (SPI_Device_t *dev);
 
 // Data Transfers
 SPI_Driver_Status_t SPI_Transmit(SPI_Device_t *dev, uint8_t *pData, uint16_t len);
-SPI_Driver_Status_t SPI_Recieve (SPI_Device_t *dev, uint8_t *pData, uint16_t len);
-SPI_Driver_Status_t SPI_TransmitRecive(SPI_Device_t *dev, uint8_t *rx, uint8_t *tx, uint16_t len);
+SPI_Driver_Status_t SPI_Receive (SPI_Device_t *dev, uint8_t *pData, uint16_t len);
+SPI_Driver_Status_t SPI_TransmitReceive(SPI_Device_t *dev, uint8_t *rx, uint8_t *tx, uint16_t len);
 
 // Single Byte Helper
 uint8_t SPI_TransferByte(SPI_Device_t *dev, uint8_t data);

@@ -49,7 +49,7 @@ SPI_Driver_Status_t SPI_Transmit(SPI_Device_t *dev, uint8_t *pData, uint16_t len
 	return SPI_DRIVER_OK;
 }
 
-SPI_Driver_Status_t SPI_Recieve(SPI_Device_t *dev, uint8_t *pData, uint16_t len){
+SPI_Driver_Status_t SPI_Receive(SPI_Device_t *dev, uint8_t *pData, uint16_t len){
 
 	if(dev == NULL || pData == NULL) return SPI_DRIVER_ERROR;
 	if(HAL_SPI_Receive(dev -> hspi, pData, len, SPI_TIMEOUT_MS) != HAL_OK) return SPI_DRIVER_ERROR;

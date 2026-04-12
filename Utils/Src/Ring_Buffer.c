@@ -29,12 +29,16 @@ bool RingBuffer_IsFull(RingBuffer_t *rb)
     return (next_index(rb->head) == rb->tail);
 }
 
+
+
 bool RingBuffer_Push(RingBuffer_t *rb, uint8_t data){
 
 	uint16_t next = next_index(rb -> head);
 	if(next == rb -> tail){
 		return false;
 	}
+
+	// Could use - if(RingBuffer_IsFull(rb))
 
 	rb -> buffer[rb -> head] = data;
 	rb -> head = next;
@@ -46,6 +50,9 @@ bool RingBuffer_Pop(RingBuffer_t *rb, uint8_t *data){
 	if(rb -> head == rb -> tail){
 		return false; // Ring buffer is empty
 	}
+
+	// Could use - if(RingBuffer_IsEmpty(rb)) but then 'next' index 
+	// would need to be calculated again
 
    *data = rb -> buffer[rb ->tail];
 	rb -> tail = next_index(rb -> tail);

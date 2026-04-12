@@ -37,6 +37,12 @@ static void UART_ExitCritical(uint32_t primask)
 	}
 }
 
+
+/* 
+ *	Returns a pointer to the channel in the uart_channel array 
+ *	where it is used to initialize the UART driver channel
+ */
+
 static UART_ChannelState_t *UART_GetChannel(UART_Driver_Channel_t channel)
 {
 	if(channel >= UART_DRIVER_CHANNEL_COUNT){
@@ -45,6 +51,10 @@ static UART_ChannelState_t *UART_GetChannel(UART_Driver_Channel_t channel)
 
 	return &uart_channels[channel];
 }
+
+/*
+ *	Returns the driver channel state bound to the given HAL UART handle.
+ */
 
 static UART_ChannelState_t *UART_FindChannel(UART_HandleTypeDef *huart)
 {
@@ -127,6 +137,13 @@ UART_Driver_Status_t UART_Driver_Init(UART_HandleTypeDef *huart){
 	return UART_Driver_InitChannel(UART_DRIVER_CHANNEL_CONSOLE, huart);
 }
 
+
+/* 
+	Gets the address of a channel in the uart_channel array and then
+	initialises the rest of the struct, if the channel is a console channel
+	then initialises a ringbuffer and enables its recieve interrupt
+*/
+
 UART_Driver_Status_t UART_Driver_InitChannel(UART_Driver_Channel_t channel, UART_HandleTypeDef *huart){
 	UART_ChannelState_t *state = UART_GetChannel(channel);
 
@@ -147,7 +164,7 @@ UART_Driver_Status_t UART_Driver_InitChannel(UART_Driver_Channel_t channel, UART
 	return UART_DRIVER_OK;
 }
 
-// RX
+// RX (only one global buffer is used here as only one source of rx is used)
 bool UART_ReadByte(uint8_t *data){
 	return RingBuffer_Pop(&rx_buffer, data);
 }
@@ -179,6 +196,7 @@ UART_Driver_Status_t UART_WriteChannel(UART_Driver_Channel_t channel, uint8_t *d
 
 	return UART_DRIVER_OK;
 }
+
 UART_Driver_Status_t UART_WriteString(const char *str){
 	if(str == NULL) return UART_DRIVER_ERROR;
 

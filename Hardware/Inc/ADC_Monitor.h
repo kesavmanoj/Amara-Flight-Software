@@ -58,6 +58,7 @@ typedef struct {
 
 ADC_Monitor_Status_t ADC_Monitor_Init(ADC_HandleTypeDef *hadc);
 ADC_Monitor_Status_t ADC_Monitor_Start(void);
+ADC_Monitor_Status_t ADC_Monitor_Stop(void);
 ADC_Monitor_Status_t ADC_Monitor_GetData(ADC_HealthData_t *data);
 
 /* DMA callback hook */

@@ -10,7 +10,6 @@
 
 #define OLED_CONTROL_BYTE_COMMAND   0x00U
 #define OLED_CONTROL_BYTE_DATA      0x40U
-#define OLED_I2C_TIMEOUT_MS         100U
 #define OLED_I2C_DATA_CHUNK_SIZE    32U
 
 #define OLED_CMD_DISPLAY_OFF        0xAEU
@@ -88,7 +87,7 @@ static const uint8_t oled_font_5x7[95][5] =
 
 static OLED_Status_t OLED_ValidateConfiguredHandle(const OLED_HandleTypeDef *oled)
 {
-    if ((oled == NULL) || (oled->hi2c == NULL) || (oled->i2c_addr_7bit > 0x7FU))
+    if ((oled == NULL) || (oled->bus == NULL) || (oled->bus->hi2c == NULL) || (oled->i2c_addr_7bit > 0x7FU))
     {
         return OLED_STATUS_INVALID_PARAM;
     }
@@ -113,14 +112,9 @@ static OLED_Status_t OLED_ValidateReadyHandle(const OLED_HandleTypeDef *oled)
     return OLED_STATUS_OK;
 }
 
-static OLED_Status_t OLED_ConvertHalStatus(HAL_StatusTypeDef hal_status)
+static OLED_Status_t OLED_ConvertBusStatus(I2C_Status_t bus_status)
 {
-    return (hal_status == HAL_OK) ? OLED_STATUS_OK : OLED_STATUS_I2C_ERROR;
-}
-
-static uint16_t OLED_GetTransferAddress(const OLED_HandleTypeDef *oled)
-{
-    return ((uint16_t)oled->i2c_addr_7bit << 1U);
+    return (bus_status == I2C_OK) ? OLED_STATUS_OK : OLED_STATUS_I2C_ERROR;
 }
 
 static OLED_Status_t OLED_Transmit(OLED_HandleTypeDef *oled, const uint8_t *buffer, uint16_t length)
@@ -132,12 +126,11 @@ static OLED_Status_t OLED_Transmit(OLED_HandleTypeDef *oled, const uint8_t *buff
         return OLED_STATUS_INVALID_PARAM;
     }
 
-    return OLED_ConvertHalStatus(
-        HAL_I2C_Master_Transmit(oled->hi2c,
-                                OLED_GetTransferAddress(oled),
-                                (uint8_t *)buffer,
-                                length,
-                                OLED_I2C_TIMEOUT_MS));
+    return OLED_ConvertBusStatus(
+        I2C_Bus_Write(oled->bus,
+                      oled->i2c_addr_7bit,
+                      buffer,
+                      length));
 }
 
 static OLED_Status_t OLED_WriteCommandList(OLED_HandleTypeDef *oled,
@@ -176,7 +169,7 @@ static OLED_Status_t OLED_WriteCommandList(OLED_HandleTypeDef *oled,
 }
 
 OLED_Status_t OLED_Init(OLED_HandleTypeDef *oled,
-                        I2C_HandleTypeDef *hi2c,
+                        I2C_Bus_Handle_t *bus,
                         uint8_t i2c_addr_7bit)
 {
     static const uint8_t init_sequence[] =
@@ -200,20 +193,20 @@ OLED_Status_t OLED_Init(OLED_HandleTypeDef *oled,
         OLED_CMD_DISPLAY_ON
     };
 
-    if ((oled == NULL) || (hi2c == NULL) || (i2c_addr_7bit > 0x7FU))
+    if ((oled == NULL) || (bus == NULL) || (bus->hi2c == NULL) || (i2c_addr_7bit > 0x7FU))
     {
         return OLED_STATUS_INVALID_PARAM;
     }
 
     memset(oled, 0, sizeof(*oled));
-    oled->hi2c = hi2c;
+    oled->bus = bus;
     oled->i2c_addr_7bit = i2c_addr_7bit;
     oled->width = OLED_SSD1306_WIDTH;
     oled->height = OLED_SSD1306_HEIGHT;
     oled->page_count = OLED_SSD1306_PAGE_COUNT;
     oled->controller = OLED_CONTROLLER_SSD1306;
 
-    if (HAL_I2C_IsDeviceReady(hi2c, OLED_GetTransferAddress(oled), 2U, OLED_I2C_TIMEOUT_MS) != HAL_OK)
+    if (I2C_Bus_IsDeviceReady(bus, oled->i2c_addr_7bit, 2U) != I2C_OK)
     {
         return OLED_STATUS_I2C_ERROR;
     }
