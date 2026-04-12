@@ -34,6 +34,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stdbool.h>
 #include <string.h>
 #include "Telemetry.h"
 #include "ADC_Monitor.h"
@@ -44,6 +45,9 @@
 #include "Command_Parser.h"
 #include "I2C_Bus.h"
 #include "OLED_Display.h"
+#include "SX1278.h"
+#include "G2S_Link.h"
+#include "IPMS.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -68,6 +72,11 @@ static volatile uint32_t g_telem_tx_complete_count = 0;
 static volatile uint32_t g_telem_error_count = 0;
 static I2C_Bus_Handle_t g_i2c1_bus;
 static OLED_HandleTypeDef g_oled;
+static SX1278_Handle_t g_radio;
+static G2S_Link_Handle_t g_g2s_link;
+static IPMS_Config_t g_ipms_config;
+static ADC_HealthData_t g_latest_adc_data;
+static bool g_latest_adc_valid = false;
 
 /* USER CODE END PV */
 
@@ -90,6 +99,200 @@ static const char *Main_TelemetryTimestampSourceToString(TelemetryTimestampSourc
     default:
       return "UPTIME_FALLBACK";
   }
+}
+
+static uint32_t Main_PackIpmsEventValue(const IPMS_Event_t *event)
+{
+  if (event == NULL)
+  {
+    return 0U;
+  }
+
+  switch (event->type)
+  {
+    case IPMS_EVENT_STATE_TRANSITION:
+      return ((uint32_t)event->old_state << 24)
+          | ((uint32_t)event->new_state << 16)
+          | ((uint32_t)event->reason << 8)
+          | (uint32_t)event->simulation_mode;
+
+    case IPMS_EVENT_WAKEUP:
+      return ((uint32_t)event->wake_source << 24)
+          | ((uint32_t)event->new_state << 16)
+          | ((uint32_t)event->policy_mode << 8)
+          | (uint32_t)event->reason;
+
+    case IPMS_EVENT_SIMULATION_MODE_CHANGE:
+      return ((uint32_t)event->simulation_mode << 24)
+          | ((uint32_t)event->old_state << 16)
+          | ((uint32_t)event->policy_mode << 8)
+          | (uint32_t)event->reason;
+
+    case IPMS_EVENT_POLICY_MODE_CHANGE:
+    default:
+      return ((uint32_t)event->policy_mode << 24)
+          | ((uint32_t)event->old_state << 16)
+          | ((uint32_t)event->simulation_mode << 8)
+          | (uint32_t)event->reason;
+  }
+}
+
+static void Main_ReportIpmsEvents(void)
+{
+  IPMS_Event_t event;
+  Telemetry_Status_t telem_status;
+
+  while (IPMS_PopEvent(&event))
+  {
+    switch (event.type)
+    {
+      case IPMS_EVENT_STATE_TRANSITION:
+        if ((event.new_state == IPMS_POWER_STATE_LOW_POWER_WARNING)
+            || (event.new_state == IPMS_POWER_STATE_SLEEP_CANDIDATE)
+            || (event.new_state == IPMS_POWER_STATE_STOP_CANDIDATE))
+        {
+          Logger_Warn("IPMS state: %s -> %s reason=%s measured=%.3fV effective=%.3fV",
+                      IPMS_PowerStateToString(event.old_state),
+                      IPMS_PowerStateToString(event.new_state),
+                      IPMS_ReasonToString(event.reason),
+                      event.measured_battery_voltage,
+                      event.effective_battery_voltage);
+        }
+        else
+        {
+          Logger_Info("IPMS state: %s -> %s reason=%s measured=%.3fV effective=%.3fV",
+                      IPMS_PowerStateToString(event.old_state),
+                      IPMS_PowerStateToString(event.new_state),
+                      IPMS_ReasonToString(event.reason),
+                      event.measured_battery_voltage,
+                      event.effective_battery_voltage);
+        }
+
+        telem_status = Telemetry_SendEventEx(TELEM_EVENT_POWER_STATE, Main_PackIpmsEventValue(&event));
+        Logger_Info("IPMS telemetry event: type=POWER_STATE result=%s", Telemetry_StatusToString(telem_status));
+        break;
+
+      case IPMS_EVENT_WAKEUP:
+        Logger_Info("IPMS wakeup: source=%s next_state=%s reason=%s",
+                    IPMS_WakeSourceToString(event.wake_source),
+                    IPMS_PowerStateToString(event.new_state),
+                    IPMS_ReasonToString(event.reason));
+        telem_status = Telemetry_SendEventEx(TELEM_EVENT_POWER_WAKEUP, Main_PackIpmsEventValue(&event));
+        Logger_Info("IPMS telemetry event: type=POWER_WAKEUP result=%s", Telemetry_StatusToString(telem_status));
+        break;
+
+      case IPMS_EVENT_SIMULATION_MODE_CHANGE:
+      case IPMS_EVENT_POLICY_MODE_CHANGE:
+      default:
+        Logger_Info("IPMS mode event: type=%s sim=%s policy=%s reason=%s",
+                    IPMS_EventTypeToString(event.type),
+                    IPMS_SimulationModeToString(event.simulation_mode),
+                    IPMS_PolicyModeToString(event.policy_mode),
+                    IPMS_ReasonToString(event.reason));
+        telem_status = Telemetry_SendEventEx(TELEM_EVENT_POWER_MODE, Main_PackIpmsEventValue(&event));
+        Logger_Info("IPMS telemetry event: type=POWER_MODE result=%s", Telemetry_StatusToString(telem_status));
+        break;
+    }
+  }
+}
+
+static void Main_PrepareForLowPower(void)
+{
+  (void)ADC_Monitor_Stop();
+  (void)SX1278_SetMode(&g_radio, SX1278_MODE_SLEEP);
+  g_latest_adc_valid = false;
+}
+
+static void Main_RestoreAfterSleep(void)
+{
+  (void)ADC_Monitor_Init(&hadc1);
+  (void)ADC_Monitor_Start();
+  (void)SX1278_StartReceiveContinuous(&g_radio);
+}
+
+static void Main_RestoreAfterStop(void)
+{
+  UART_Driver_Status_t uart_status;
+  UART_Driver_Status_t telem_uart_status;
+  ADC_Monitor_Status_t adc_init_status;
+  ADC_Monitor_Status_t adc_start_status;
+  I2C_Status_t i2c_status;
+  OLED_Status_t oled_status = OLED_STATUS_INVALID_PARAM;
+  SX1278_Status_t radio_status;
+
+  SystemClock_Config();
+  HAL_ResumeTick();
+
+  MX_DMA_Init();
+  MX_USART1_UART_Init();
+  MX_USART2_UART_Init();
+  MX_I2C1_Init();
+  MX_SPI1_Init();
+  MX_ADC1_Init();
+  MX_CRC_Init();
+
+  uart_status = UART_Driver_Init(&huart2);
+  telem_uart_status = UART_Driver_InitChannel(UART_DRIVER_CHANNEL_TELEMETRY, &huart1);
+  adc_init_status = ADC_Monitor_Init(&hadc1);
+  adc_start_status = ADC_Monitor_Start();
+  i2c_status = I2C_Bus_Init(&g_i2c1_bus, &hi2c1);
+  if (i2c_status == I2C_OK)
+  {
+    oled_status = OLED_Init(&g_oled, &g_i2c1_bus, OLED_I2C_ADDR_0x3C);
+  }
+
+  radio_status = SX1278_Init(&g_radio, &hspi1, LORA_CS_GPIO_Port, LORA_CS_Pin, NULL, 0U, false);
+  g_latest_adc_valid = false;
+
+  Logger_Info("IPMS stop restore: UART=%s TELEM_UART=%s ADC_INIT=%s ADC_START=%s I2C=%s OLED=%d RADIO=%s",
+              UART_Driver_StatusToString(uart_status),
+              UART_Driver_StatusToString(telem_uart_status),
+              ADC_Monitor_StatusToString(adc_init_status),
+              ADC_Monitor_StatusToString(adc_start_status),
+              I2C_Bus_StatusToString(i2c_status),
+              oled_status,
+              SX1278_StatusToString(radio_status));
+}
+
+static void Main_ExecuteIpmsAction(const IPMS_ActionRequest_t *request)
+{
+  IPMS_Status_t rtc_status;
+
+  if ((request == NULL) || (request->type == IPMS_ACTION_NONE))
+  {
+    return;
+  }
+
+  Logger_Warn("IPMS action: %s duration=%lu ms",
+              IPMS_ActionTypeToString(request->type),
+              (unsigned long)request->duration_ms);
+
+  rtc_status = IPMS_ArmRtcWakeup(&hrtc, request->duration_ms);
+  if (rtc_status != IPMS_STATUS_OK)
+  {
+    Logger_Warn("IPMS wakeup arm failed: %s", IPMS_StatusToString(rtc_status));
+    return;
+  }
+
+  Main_PrepareForLowPower();
+  HAL_IWDG_Refresh(&hiwdg);
+  __HAL_PWR_CLEAR_FLAG(PWR_FLAG_WU);
+  HAL_SuspendTick();
+
+  if (request->type == IPMS_ACTION_ENTER_SLEEP)
+  {
+    HAL_PWR_EnterSLEEPMode(PWR_LOWPOWERREGULATOR_ON, PWR_SLEEPENTRY_WFI);
+    HAL_ResumeTick();
+    Main_RestoreAfterSleep();
+  }
+  else
+  {
+    HAL_PWR_EnterSTOPMode(PWR_LOWPOWERREGULATOR_ON, PWR_STOPENTRY_WFI);
+    Main_RestoreAfterStop();
+  }
+
+  IPMS_DisarmRtcWakeup(&hrtc);
+  IPMS_RecordWakeup(IPMS_WAKE_SOURCE_UNKNOWN, HAL_GetTick());
 }
 
 /* USER CODE END 0 */
@@ -145,6 +348,10 @@ int main(void)
   Telemetry_Init(&hcrc);
   Telemetry_Status_t boot_telem_status = Telemetry_SendSystemStatusEx(0x01U);
   Telemetry_Status_t boot_event_status = Telemetry_SendEventEx(TELEM_EVENT_BOOT, HAL_GetTick());
+  IPMS_GetDefaultConfig(&g_ipms_config);
+  IPMS_Status_t ipms_status = IPMS_Init(&g_ipms_config);
+  SX1278_Status_t radio_status = SX1278_Init(&g_radio, &hspi1, LORA_CS_GPIO_Port, LORA_CS_Pin, NULL, 0U, false);
+  G2S_Status_t g2s_status = G2S_Link_Init(&g_g2s_link, &g_radio, &hcrc);
 
   I2C_Status_t i2c_bus_status = I2C_Bus_Init(&g_i2c1_bus, &hi2c1);
   OLED_Status_t oled_status = OLED_STATUS_INVALID_PARAM;
@@ -166,15 +373,24 @@ int main(void)
 
   Logger_Info("Initialization Complete");
   Logger_Info("CLI/Logger UART=USART2 @115200, Telemetry UART=USART1 @57600");
-  Logger_Info("Startup status: UART=%s TELEM_UART=%s ADC_INIT=%s ADC_START=%s TELEM_BOOT=%s BOOT_EVT=%s I2C=%s OLED=%d",
+  Logger_Info("Startup status: UART=%s TELEM_UART=%s ADC_INIT=%s ADC_START=%s TELEM_BOOT=%s BOOT_EVT=%s IPMS=%s RADIO=%s G2S=%s I2C=%s OLED=%d",
 		  UART_Driver_StatusToString(uart_status),
 		  UART_Driver_StatusToString(telem_uart_status),
 		  ADC_Monitor_StatusToString(adc_init_status),
 		  ADC_Monitor_StatusToString(adc_start_status),
 		  Telemetry_StatusToString(boot_telem_status),
 		  Telemetry_StatusToString(boot_event_status),
+          IPMS_StatusToString(ipms_status),
+		  SX1278_StatusToString(radio_status),
+		  G2S_StatusToString(g2s_status),
 		  I2C_Bus_StatusToString(i2c_bus_status),
 		  oled_status);
+  Logger_Info("IPMS defaults: warn<=%.2f sleep<=%.2f stop<=%.2f policy=%s sim=%s",
+              g_ipms_config.warn_enter_v,
+              g_ipms_config.sleep_enter_v,
+              g_ipms_config.stop_enter_v,
+              IPMS_PolicyModeToString(IPMS_POLICY_MONITOR_ONLY),
+              IPMS_SimulationModeToString(IPMS_SIMULATION_AUTO));
 
 
   /* USER CODE END 2 */
@@ -196,20 +412,38 @@ int main(void)
 	  static uint32_t last_telem_queue_ms = 0;
 	  static uint32_t last_telem_report_ms = 0;
 	  static uint32_t last_adc_report_ms = 0;
+	  static uint32_t last_radio_report_ms = 0;
+      static uint32_t last_power_sample_ms = 0;
 	  static uint8_t telemetry_status_counter = 0;
 	  uint32_t now = HAL_GetTick();
+      IPMS_ActionRequest_t power_action;
 	  
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
 	CommandParser_Process();
 	Telemetry_Process();
+	(void)G2S_Link_Process(&g_g2s_link);
 	HAL_IWDG_Refresh(&hiwdg);
+    Main_ReportIpmsEvents();
 
 	if((now - last_heartbeat_ms) >= 500U){
 		last_heartbeat_ms = now;
 		HAL_GPIO_TogglePin(LD2_HEARTBEAT_GPIO_Port, LD2_HEARTBEAT_Pin);
 	}
+
+    if((now - last_power_sample_ms) >= 1000U){
+        ADC_HealthData_t adc_sample;
+        ADC_Monitor_Status_t adc_status = ADC_Monitor_GetData(&adc_sample);
+
+        if(adc_status == ADC_MONITOR_OK){
+            g_latest_adc_data = adc_sample;
+            g_latest_adc_valid = true;
+            (void)IPMS_ProcessBatterySample(adc_sample.battery_voltage, now);
+        }
+
+        last_power_sample_ms = now;
+    }
 
 	if((now - last_telem_queue_ms) >= 2000U){
 		uint8_t status_code = (uint8_t)(0x10U | (telemetry_status_counter & 0x0FU));
@@ -253,28 +487,57 @@ int main(void)
 	}
 
 	if((now - last_adc_report_ms) >= 5000U){
-		ADC_HealthData_t adc_data;
-		ADC_Monitor_Status_t adc_status = ADC_Monitor_GetData(&adc_data);
-
-		if(adc_status == ADC_MONITOR_OK){
+		if(g_latest_adc_valid){
 			Telemetry_Status_t adc_telem_status = Telemetry_SendADCHealthEx(
-					adc_data.vdda_voltage,
-					adc_data.battery_voltage,
-					adc_data.mcu_temp_c);
+					g_latest_adc_data.vdda_voltage,
+					g_latest_adc_data.battery_voltage,
+					g_latest_adc_data.mcu_temp_c);
 
 			Logger_Info("ADC health: VDDA=%.3fV TEMP=%.2fC BATT=%.3fV",
-					adc_data.vdda_voltage,
-					adc_data.mcu_temp_c,
-					adc_data.battery_voltage);
+					g_latest_adc_data.vdda_voltage,
+					g_latest_adc_data.mcu_temp_c,
+					g_latest_adc_data.battery_voltage);
 			Logger_Info("ADC telemetry queue: result=%s", Telemetry_StatusToString(adc_telem_status));
 		} else {
-			Telemetry_Status_t adc_error_event = Telemetry_SendEventEx(TELEM_EVENT_ADC_READ_ERROR, (uint32_t)adc_status);
-			Logger_Warn("ADC health read failed: status=%s(%d)", ADC_Monitor_StatusToString(adc_status), adc_status);
+			Telemetry_Status_t adc_error_event = Telemetry_SendEventEx(TELEM_EVENT_ADC_READ_ERROR, (uint32_t)ADC_MONITOR_NOT_READY);
+			Logger_Warn("ADC health unavailable: status=%s(%d)",
+                        ADC_Monitor_StatusToString(ADC_MONITOR_NOT_READY),
+                        ADC_MONITOR_NOT_READY);
 			Logger_Warn("ADC error event queue: result=%s", Telemetry_StatusToString(adc_error_event));
 		}
 
 		last_adc_report_ms = now;
 	}
+
+	if((now - last_radio_report_ms) >= 4000U){
+		G2S_Stats_t g2s_stats;
+		uint8_t version = 0U;
+		SX1278_Status_t version_status = SX1278_ReadVersion(&g_radio, &version);
+
+		G2S_Link_GetStats(&g_g2s_link, &g2s_stats);
+		Logger_Info("Radio status: sx1278=%s version_status=%s version=0x%02X mode=%d freq=%luHz",
+				SX1278_StatusToString(radio_status),
+				SX1278_StatusToString(version_status),
+				version,
+				(int)g_radio.state.mode,
+				(unsigned long)g_radio.state.frequency_hz);
+		Logger_Info("G2S stats: rx=%lu tx=%lu crc_fail=%lu cmd=%lu ack=%lu unsupported=%lu cmd_fail=%lu last=%s next_seq=%u last_rx_seq=%u",
+				(unsigned long)g2s_stats.rx_packets,
+				(unsigned long)g2s_stats.tx_packets,
+				(unsigned long)g2s_stats.crc_failures,
+				(unsigned long)g2s_stats.command_packets,
+				(unsigned long)g2s_stats.ack_packets,
+				(unsigned long)g2s_stats.unsupported_packets,
+				(unsigned long)g2s_stats.command_failures,
+				G2S_StatusToString(g2s_stats.last_status),
+				(unsigned int)g2s_stats.next_tx_sequence,
+				(unsigned int)g2s_stats.last_rx_sequence);
+		last_radio_report_ms = now;
+	}
+
+    if(IPMS_GetPendingAction(&power_action)){
+        Main_ExecuteIpmsAction(&power_action);
+    }
   }
   /* USER CODE END 3 */
 }
@@ -364,6 +627,20 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
     }
 
     UART_ErrorCallback(huart);
+}
+
+void HAL_RTCEx_WakeUpTimerEventCallback(RTC_HandleTypeDef *hrtc_handle)
+{
+    (void)hrtc_handle;
+    IPMS_OnRtcWakeup();
+}
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+    if (GPIO_Pin == B1_USER_BUTTON_Pin)
+    {
+        IPMS_OnButtonWakeup();
+    }
 }
 
 /* USER CODE END 4 */
