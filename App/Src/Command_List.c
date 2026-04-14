@@ -10,6 +10,8 @@
 #include "ADC_Monitor.h"
 #include "Telemetry.h"
 #include "IPMS.h"
+#include "Storage_Service.h"
+#include "bsp_driver_sd.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -22,6 +24,8 @@
 #define CMD_ID_PWR_STATUS 0x10U
 #define CMD_ID_PWR_SIM    0x11U
 #define CMD_ID_PWR_POLICY 0x12U
+#define CMD_ID_SD_STATUS  0x20U
+#define CMD_ID_SD_TEST    0x21U
 #define MAX_TOKENS      5
 
 static char *Command_TrimWhitespace(char *input)
@@ -63,6 +67,53 @@ static UART_Driver_Status_t Command_WriteResponse(const char *response)
 	}
 
 	return status;
+}
+
+static const char *Command_FatFsResultToString(FRESULT result)
+{
+	switch(result){
+	case FR_OK:
+		return "FR_OK";
+	case FR_DISK_ERR:
+		return "FR_DISK_ERR";
+	case FR_INT_ERR:
+		return "FR_INT_ERR";
+	case FR_NOT_READY:
+		return "FR_NOT_READY";
+	case FR_NO_FILE:
+		return "FR_NO_FILE";
+	case FR_NO_PATH:
+		return "FR_NO_PATH";
+	case FR_INVALID_NAME:
+		return "FR_INVALID_NAME";
+	case FR_DENIED:
+		return "FR_DENIED";
+	case FR_EXIST:
+		return "FR_EXIST";
+	case FR_INVALID_OBJECT:
+		return "FR_INVALID_OBJECT";
+	case FR_WRITE_PROTECTED:
+		return "FR_WRITE_PROTECTED";
+	case FR_INVALID_DRIVE:
+		return "FR_INVALID_DRIVE";
+	case FR_NOT_ENABLED:
+		return "FR_NOT_ENABLED";
+	case FR_NO_FILESYSTEM:
+		return "FR_NO_FILESYSTEM";
+	case FR_MKFS_ABORTED:
+		return "FR_MKFS_ABORTED";
+	case FR_TIMEOUT:
+		return "FR_TIMEOUT";
+	case FR_LOCKED:
+		return "FR_LOCKED";
+	case FR_NOT_ENOUGH_CORE:
+		return "FR_NOT_ENOUGH_CORE";
+	case FR_TOO_MANY_OPEN_FILES:
+		return "FR_TOO_MANY_OPEN_FILES";
+	case FR_INVALID_PARAMETER:
+	default:
+		return "FR_INVALID_PARAMETER";
+	}
 }
 
 static void Command_InitResult(Command_Result_t *result, uint8_t command_id)
@@ -355,13 +406,144 @@ static Command_Status_t CMD_PWR_POLICY(int argc, char *argv[], Command_Result_t 
 	return COMMAND_STATUS_OK;
 }
 
+static Command_Status_t CMD_SD_STATUS(int argc, char *argv[], Command_Result_t *result)
+{
+    StorageService_SdStatusResult_t storage_result;
+    StorageService_Status_t service_status;
+    char response[160];
+
+    (void)argc;
+    (void)argv;
+
+    Command_InitResult(result, CMD_ID_SD_STATUS);
+    service_status = StorageService_RequestSdStatus(&storage_result, 1000U);
+
+    if (service_status != STORAGE_SERVICE_STATUS_OK)
+    {
+        snprintf(response,
+                 sizeof(response),
+                 "ERR: SD service %s\r\n",
+                 StorageService_StatusToString(service_status));
+        (void)Command_WriteResponse(response);
+
+        if(result != NULL){
+            result->ack_status_code = -10;
+            result->argument = (uint32_t)service_status;
+            result->status = COMMAND_STATUS_NOT_READY;
+        }
+        Command_SendAck(result);
+        return COMMAND_STATUS_NOT_READY;
+    }
+
+    if (storage_result.op_status == STORAGE_OP_STATUS_OK)
+    {
+        snprintf(response,
+                 sizeof(response),
+                 "SD detect=%s init=%s state=%s blocks=%lu block_size=%lu\r\n",
+                 (storage_result.detected == SD_PRESENT) ? "PRESENT" : "ABSENT",
+                 (storage_result.init_status == MSD_OK) ? "OK" : "ERROR",
+                 (storage_result.card_state == SD_TRANSFER_OK) ? "TRANSFER_OK" : "BUSY",
+                 (unsigned long)storage_result.block_count,
+                 (unsigned long)storage_result.block_size);
+        (void)Command_WriteResponse(response);
+
+        if(result != NULL){
+            result->ack_status_code = 0;
+            result->argument = storage_result.block_count;
+            result->status = COMMAND_STATUS_OK;
+        }
+        Command_SendAck(result);
+        return COMMAND_STATUS_OK;
+    }
+
+    snprintf(response,
+             sizeof(response),
+             "ERR: SD %s detect=%s init=%s\r\n",
+             StorageService_OpStatusToString(storage_result.op_status),
+             (storage_result.detected == SD_PRESENT) ? "PRESENT" : "ABSENT",
+             (storage_result.init_status == MSD_OK) ? "OK" : "ERROR");
+    (void)Command_WriteResponse(response);
+
+    if(result != NULL){
+        result->ack_status_code = -1;
+        result->argument = (uint32_t)storage_result.op_status;
+        result->status = COMMAND_STATUS_NOT_READY;
+    }
+    Command_SendAck(result);
+    return COMMAND_STATUS_NOT_READY;
+}
+
+static Command_Status_t CMD_SD_TEST(int argc, char *argv[], Command_Result_t *result)
+{
+    StorageService_SmokeTestResult_t storage_result;
+    StorageService_Status_t service_status;
+    char response[160];
+
+    (void)argc;
+    (void)argv;
+
+    Command_InitResult(result, CMD_ID_SD_TEST);
+    service_status = StorageService_RequestSmokeTest(&storage_result, 2000U);
+
+    if (service_status != STORAGE_SERVICE_STATUS_OK)
+    {
+        snprintf(response,
+                 sizeof(response),
+                 "ERR: SD service %s\r\n",
+                 StorageService_StatusToString(service_status));
+        (void)Command_WriteResponse(response);
+        if(result != NULL){
+            result->ack_status_code = -10;
+            result->argument = (uint32_t)service_status;
+            result->status = COMMAND_STATUS_NOT_READY;
+        }
+        Command_SendAck(result);
+        return COMMAND_STATUS_NOT_READY;
+    }
+
+    if (storage_result.op_status != STORAGE_OP_STATUS_OK)
+    {
+        snprintf(response,
+                 sizeof(response),
+                 "ERR: SD Test %s %s\r\n",
+                 StorageService_OpStatusToString(storage_result.op_status),
+                 Command_FatFsResultToString(storage_result.fatfs_result));
+        (void)Command_WriteResponse(response);
+        if(result != NULL){
+            result->ack_status_code = -5;
+            result->argument = (uint32_t)storage_result.op_status;
+            result->status = COMMAND_STATUS_IO_ERROR;
+        }
+        Command_SendAck(result);
+        return COMMAND_STATUS_IO_ERROR;
+    }
+
+    snprintf(response,
+             sizeof(response),
+             "SD test OK write=%u read=%u sample=\"%s\"\r\n",
+             (unsigned int)storage_result.bytes_written,
+             (unsigned int)storage_result.bytes_read,
+             storage_result.sample);
+    (void)Command_WriteResponse(response);
+
+    if(result != NULL){
+        result->ack_status_code = 0;
+        result->argument = storage_result.bytes_written;
+        result->status = COMMAND_STATUS_OK;
+    }
+    Command_SendAck(result);
+    return COMMAND_STATUS_OK;
+}
+
 const CommandEntry_t command_table[] = {
 		{"PING"		, 		CMD_PING	 },
 		{"GET_ADC"	, 		CMD_GET_ADC	 },
 		{"SET_RATE"	, 		CMD_SET_RATE },
 		{"PWR_STATUS",  CMD_PWR_STATUS},
 		{"PWR_SIM",     CMD_PWR_SIM},
-		{"PWR_POLICY",  CMD_PWR_POLICY}
+		{"PWR_POLICY",  CMD_PWR_POLICY},
+        {"SD_STATUS",   CMD_SD_STATUS},
+        {"SD_TEST",     CMD_SD_TEST}
 };
 
 const uint32_t command_count =

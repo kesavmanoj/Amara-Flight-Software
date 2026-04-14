@@ -12,6 +12,7 @@
 #include <stdarg.h>
 #include "stm32f4xx_hal.h"
 #include "UART_Driver.h"
+#include "Storage_Service.h"
 
 // typedef enum {
 // 	LOG_LEVEL_INFO,
@@ -23,7 +24,9 @@
 typedef struct {
     uint32_t messages_attempted;
     uint32_t messages_dropped;
+    uint32_t messages_persist_dropped;
     UART_Driver_Status_t last_uart_status;
+    StorageService_Status_t last_storage_status;
 } Logger_Stats_t;
 
 void Get_Timestamp(char* buf, size_t buf_size);

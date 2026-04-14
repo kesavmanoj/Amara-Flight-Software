@@ -68,7 +68,7 @@ void Error_Handler(void);
 #define SD_CS_GPIO_Port GPIOB
 #define PWR_EN_SENSORS_Pin GPIO_PIN_1
 #define PWR_EN_SENSORS_GPIO_Port GPIOB
-#define SD_DETECT_DUMMY_Pin GPIO_PIN_9
+#define SD_DETECT_DUMMY_Pin GPIO_PIN_7
 #define SD_DETECT_DUMMY_GPIO_Port GPIOC
 
 /* USER CODE BEGIN Private defines */

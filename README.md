@@ -1,226 +1,170 @@
-# CubeSat Flight Computer Emulator (UNFINISHED)
+# CubeSat Flight Computer Emulator (STM32F446RE)
 
-### AI Generated README (i am lazy)
-## 1. Project Overview
-This firmware is a modular STM32F446RE-based embedded platform for a CubeSat flight computer emulator, written in C on top of STM32 HAL. The codebase follows a layered embedded structure:
+This project is a mission-style embedded firmware stack for a CubeSat flight computer emulator.  
+It is built on STM32 HAL + FreeRTOS and organized as a phased architecture from basic bring-up to radio, power management, storage, and RTOS ownership.
 
-- `Core`: CubeMX-generated MCU and peripheral initialization
-- `Hardware`: board/peripheral-facing drivers
-- `Utils`: reusable infrastructure such as logging and buffering
-- `App`: application logic, command handling, and telemetry framing
+The goal of this README is to help you understand the system end-to-end, phase by phase, from boot to runtime behavior.
 
-The current firmware provides:
+---
 
-- interrupt-driven CLI reception on `USART2`
-- DMA-backed non-blocking UART TX for both console and telemetry
-- UART text logging
-- continuous ADC monitoring with DMA
-- a table-driven command system
-- binary telemetry frame generation with CRC on `USART1`
-- OLED bring-up on `I2C1` through the modular I2C bus wrapper
-- SX1278 LoRa device initialization on `SPI1`
-- a first Ground-to-Space (`G2S`) radio packet layer on top of SX1278
-- an Intelligent Power Management System (`IPMS`) with simulated sunlight/eclipse modes and RTC-based wakeup
+## 1) What This Firmware Does
 
-## Note
-Import the `.ioc` file into STM32CubeMX, regenerate code as needed, then build/flash with STM32CubeIDE.
+At runtime, the firmware currently provides:
 
-Radio and G2S bench validation context is documented in [PHASE2_TESTING.md](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/PHASE2_TESTING.md).
+- Console command + logging path on `USART2` (text, human-readable)
+- Binary telemetry path on `USART1` (framed packets with CRC)
+- ADC health monitoring (VDDA, temperature, battery) via DMA
+- LoRa radio device layer (`SX1278`) and G2S command packet flow
+- IPMS (Intelligent Power Management System) with battery-driven state machine
+- SDIO/FatFs storage service owned by a dedicated RTOS task
+- Buffered persistent log append with flush/rotation policy
+- RTOS task ownership for comm, telemetry/radio, health/power, and storage
 
-## 2. System Architecture
-High-level data flow:
+---
 
-- CLI/logging path: `USART2 RX IRQ -> RX ring buffer -> CommandParser_Process() -> command dispatch -> Logger/UART console TX`
-- telemetry path: `application status -> telemetry frame builder -> frame queue -> UART driver telemetry channel -> USART1 DMA TX`
-- ADC path: `ADC1 scan + DMA -> ADC conversion callback -> processed engineering values -> CLI/log output`
+## 2) Repository Layout
 
-Current UART ownership:
+- `Core/`  
+  CubeMX-generated startup and peripheral init (`main.c`, `freertos.c`, interrupt handlers)
+- `Hardware/`  
+  Driver layer (`UART_Driver`, `SPI_Bus`, `I2C_Bus`, `ADC_Monitor`, `SX1278`, OLED)
+- `App/`  
+  Application logic (`Telemetry`, `Command_*`, `G2S_Link`, `IPMS`, `Storage_Service`, runtime state/resources)
+- `Utils/`  
+  Reusable utilities (`Logger`, ring buffers)
+- `FATFS/`  
+  FatFs middleware + SD BSP glue
 
-- `USART2 @ 115200`: CLI + logger text
-- `USART1 @ 57600`: binary telemetry
+---
 
-This split keeps readable console traffic separate from binary telemetry frames.
+## 3) Runtime Architecture (Current)
 
-## 3. Firmware Modules
+### RTOS Tasks
 
-### UART Driver
-Purpose: provide a transport layer over HAL UART with interrupt RX and DMA-backed non-blocking TX.
+- `CommTask`  
+  Owns command ingress (`CommandParser_Process`) and G2S receive processing (`G2S_Link_Process`)
+- `TelemetryRadioTask`  
+  Owns `Telemetry_Process` and periodic telemetry/radio status reporting
+- `HealthPowerTask`  
+  Owns ADC/IPMS periodic logic, low-power action execution, watchdog supervision
+- `StorageLogTask`  
+  Owns SD/FatFs operations and drains storage queues (commands + persistent log records)
 
-Internal design:
+### ISR Ownership
 
-- the driver now manages two logical TX channels:
-  - `UART_DRIVER_CHANNEL_CONSOLE`
-  - `UART_DRIVER_CHANNEL_TELEMETRY`
-- each channel owns:
-  - bound HAL UART handle
-  - TX ring buffer
-  - DMA staging buffer
-  - `tx_dma_len`
-  - `dma_busy`
-- console RX remains separate and interrupt-driven through a dedicated RX ring buffer
+- UART RX/TX/error callbacks remain transport callbacks and stay minimal
+- ADC DMA complete callback remains minimal and updates monitor snapshot
+- RTC wakeup + EXTI wake callbacks remain event signaling only
 
-Key functions:
+This keeps heavy work in tasks, not in interrupts.
 
-- `UART_Driver_Init()`: binds the console channel and starts 1-byte interrupt RX
-- `UART_Driver_InitChannel()`: binds an additional logical channel to a HAL UART
-- `UART_Write()`: writes to the console channel
-- `UART_WriteChannel()`: writes to a selected logical channel
-- `UART_RxCpltCallback()`: stores a received byte and rearms RX
-- `UART_TxCpltCallback()`: clears DMA busy state and starts the next queued TX chunk
-- `UART_ErrorCallback()`: clears busy state and retries queued TX work
+---
 
-Important implementation details:
+## 4) Communication Split (Why Two UARTs)
 
-- TX is non-blocking: callers enqueue data into the channel TX ring buffer
-- `UART_StartTxDMA()` pops up to `128` bytes into a stable DMA buffer, then starts `HAL_UART_Transmit_DMA()`
-- if a DMA start fails, the staged chunk remains in the DMA buffer and is retried later
-- short critical sections disable interrupts while shared TX state is updated
-- driver-local status reporting now distinguishes invalid parameters, uninitialized channels, buffer-full conditions, and generic transport errors
+- `USART2 @ 115200`  
+  CLI + logger text
+- `USART1 @ 57600`  
+  Binary telemetry transport
 
-Embedded design considerations:
+This physically separates human console text from machine telemetry bytes, preventing corruption and making debug much easier.
 
-- minimal ISR work on RX
-- DMA chunking avoids long blocking transmits
-- channelized transport keeps console traffic and telemetry physically separated
+---
 
-### Logger
-Purpose: format and emit readable system diagnostics over the console UART.
+## 5) Phase-by-Phase Walkthrough
 
-Internal design:
+## Phase 0: Re-baseline Firmware
 
-- uses `snprintf()` / `vsnprintf()` into a bounded buffer
-- prefixes messages with a timestamp and level
-- writes through `UART_Write()` on the console channel
+**Goal:** stable bring-up baseline with clear module boundaries.
 
-Important implementation details:
+### What was established
 
-- the logger no longer transmits directly through blocking HAL UART calls
-- logger output now rides on the UART driver console DMA TX path
-- the logger can fall back to boot-relative style timestamps during startup
-- logger stats now track attempted writes, dropped writes, and the last console UART status
+- `main.c` initializes peripherals + module stack in a deterministic order
+- UART driver initialized for:
+  - console channel on `USART2`
+  - telemetry channel on `USART1`
+- command parser, telemetry, ADC monitor, OLED, radio/G2S, IPMS all initialized
+- startup logs report subsystem init status for quick diagnosis
 
-Embedded design considerations:
+### Boundary rules established
 
-- fixed-size formatting buffer prevents overflow
-- console logging is asynchronous at the UART transport layer
-- log ordering is preserved per write call, but long bursts can still fill the console TX ring buffer
+- UART transport ownership stays in `UART_Driver`
+- I2C bus ownership stays in `I2C_Bus`
+- OLED uses I2C wrapper, not direct HAL calls
+- ADC monitor owns ADC DMA conversion path
+- telemetry owns frame build/queue/process and does not call HAL UART directly
 
-### ADC Monitor
-Purpose: continuously monitor internal health channels and battery sense voltage.
+---
 
-Internal design:
+## Phase 1: Harden Transport + Observability
 
-- ADC1 scans:
-  - `VREFINT`
-  - internal temperature sensor
-  - battery input on `PA0`
-- DMA runs in circular mode
-- conversion-complete callback copies/updates the latest sample set
+**Goal:** make the baseline dependable and diagnosable.
 
-Key functions:
+### Key improvements
 
-- `ADC_Monitor_Init()`
-- `ADC_Monitor_Start()`
-- `ADC_Monitor_GetData()`
-- `ADC_Monitor_ConvCpltCallback()`
+- Telemetry timestamp policy defined:
+  - frame timestamp is `uint32_t`
+  - RTC-based epoch seconds (`2000-01-01`) when RTC is valid
+  - fallback to uptime seconds when RTC unavailable/default
+- Telemetry packet coverage implemented for:
+  - system status
+  - ADC health
+  - heartbeat
+  - event/fault
+  - command ACK
+- Telemetry and logger stats improved:
+  - queue depth/peak
+  - drops/retries/errors
+  - last status snapshots for correlation
+- Command handling hardened:
+  - argument validation
+  - better response/error framing
+  - unknown/malformed handling
+- Driver-local status enums and status-to-string helpers formalized
 
-Important implementation details:
+---
 
-- uses factory calibration-based conversions
-- battery scaling assumes a `10k/10k` divider
-- sample updates are driven by DMA completion, not polling
-- status reporting is explicit through `ADC_Monitor_Status_t` and helper string conversion for logs
+## Phase 2: LoRa Device Layer + G2S Protocol
 
-### Command Parser
-Purpose: consume CLI bytes from the console RX ring buffer, build lines, tokenize commands, and dispatch handlers.
+**Goal:** real radio subsystem and command transport over LoRa.
 
-Internal design:
+### SX1278 device layer
 
-- bytes arrive through `USART2` RX interrupt
-- the parser drains the ring buffer in the main loop
-- lines are assembled until newline termination
-- arguments are tokenized with `strtok()`
-
-Important implementation details:
-
-- parser is active in the current superloop
-- CLI is now reachable at runtime through the console UART
-- command lines are trimmed for leading/trailing spaces and tokenized on spaces or tabs
-- malformed command cases now emit clearer console errors and telemetry fault events
-
-### Command System (`Command_List`)
-Purpose: provide table-driven command dispatch through function pointers.
-
-Implemented commands:
-
-- `PING`
-- `GET_ADC`
-- `SET_RATE <value>`
-- `PWR_STATUS`
-- `PWR_SIM <AUTO|SUNLIGHT|ECLIPSE>`
-- `PWR_POLICY <MONITOR|SLEEP|FULL>`
-
-Important implementation details:
-
-- the parser and command table remain decoupled
-- handlers can call logger, ADC monitor, and other modules without parser changes
-- command handlers now emit binary command-ack telemetry packets alongside console responses where appropriate
-- response writes and ACK queue failures are logged explicitly so bench traces show both command and transport outcomes
-- the same command dispatch path is now shared by UART CLI input and radio command packets
-
-### SX1278 Radio Driver
-Purpose: provide a real LoRa device layer on top of the project SPI abstraction.
-
-Current features:
+Implemented in `Hardware/Src/SX1278.c`:
 
 - register read/write
 - burst FIFO access
-- version readback and device presence validation
-- mode transitions: sleep, standby, TX, RX continuous, RX single
-- frequency, sync word, and preamble configuration
-- polling-based TX complete and RX packet retrieval through IRQ flag registers
+- mode transitions (sleep/standby/tx/rx)
+- IRQ/status flag polling
+- basic TX/RX packet path
+- version readback / presence checks
 
-Implementation notes:
+### G2S protocol layer
 
-- built on top of `SPI_Device_t` / `SPI_Bus`
-- uses `PC5` as `LORA_CS`
-- supports an optional reset GPIO, but current board configuration initializes without a dedicated reset pin
-- defaults to LoRa mode at `433 MHz` with a standard sync word and continuous receive after initialization
+Implemented in `App/Src/G2S_Link.c`:
 
-### G2S Link Layer
-Purpose: move binary command traffic over LoRa without coupling radio packets to UART text formatting.
+- fixed-size packet structure
+- source/destination + sequence + type + payload length
+- CRC validation
+- command packet ingestion into shared command dispatch
+- ACK/NACK emission path
 
-Packet format:
+### CRC policy
 
-- `sync_word`
-- `version`
-- `packet_type`
-- `source`
-- `destination`
-- `sequence`
-- `payload_length`
-- `flags`
-- fixed-size payload region
-- `crc32`
+Protocol is intentionally aligned to hardware CRC usage in this project stack.  
+Telemetry + G2S both use the STM32 CRC peripheral path.
 
-Current packet types:
+### Command routing integration
 
-- `COMMAND`
-- `ACK`
-- `EVENT`
+Both UART CLI and G2S commands route through shared command dispatch logic (`Command_List`), so behavior remains consistent regardless of ingress path.
 
-Command flow:
+---
 
-- SX1278 receives a fixed-size G2S packet
-- `G2S_Link` validates header, version, destination, and CRC
-- command payload is converted into a command line
-- the shared command dispatcher executes the command
-- an ACK/NACK radio packet is returned with command ID, status code, and argument/result metadata
+## Phase 3: Intelligent Power Management System (IPMS)
 
-### Intelligent Power Management System (IPMS)
-Purpose: make battery-aware power behavior explicit, deterministic, and testable.
+**Goal:** battery-aware, explainable, testable power behavior.
 
-Current power states:
+### State machine
 
 - `NORMAL`
 - `LOW_POWER_WARNING`
@@ -228,215 +172,221 @@ Current power states:
 - `STOP_CANDIDATE`
 - `RECOVERY`
 
-Current capabilities:
+### Policy model
 
-- hysteresis-based battery thresholds
-- multi-sample confirmation windows before state changes
-- simulation modes:
-  - `AUTO`
-  - `SUNLIGHT`
-  - `ECLIPSE`
-- policy modes:
-  - `MONITOR_ONLY`
-  - `ENABLE_SLEEP`
-  - `ENABLE_SLEEP_AND_STOP`
-- RTC wakeup timer support
-- user-button wake source support
+- simulation modes: `AUTO`, `SUNLIGHT`, `ECLIPSE`
+- policy modes: monitor only / sleep-enabled / sleep+stop-enabled
+- hysteresis + sample-window logic to avoid oscillation
 
-Runtime behavior:
+### Low-power runtime integration
 
-- IPMS consumes battery voltage from the ADC monitor path
-- state transitions are logged and also emitted as telemetry events
-- sleep/stop actions are only armed when the selected policy mode allows them
-- the default boot policy is `MONITOR_ONLY`, so low-power entry is opt-in during bring-up
+- RTC wakeup timer path integrated
+- user-button wake source integrated
+- sleep/stop entry/restore flows consolidated via `System_Runtime`
+- state transitions emit telemetry events + logs
+
+---
+
+## Phase 4: SDIO Storage + Persistent Logging
+
+**Goal:** storage ownership + robust write behavior without race-prone FatFs access.
+
+### SD interface
+
+- SDIO + FatFs path is active
+- storage interactions are routed through `Storage_Service`
+- command handlers use storage requests instead of direct FatFs calls
+
+### Storage service ownership
+
+`StorageLogTask` is the single owner of filesystem work:
+
+- mount/unmount
+- status/smoke-test command servicing
+- persistent log append path
+
+### Buffered persistent logging
+
+Logger now has dual output behavior:
+
+1. immediate console output (UART DMA path)
+2. enqueue formatted line to storage queue for persistent append
+
+### Flush/rotation policy
+
+Current defaults in `Storage_Service.c`:
+
+- log queue length: 16 records
+- flush every ~1000 ms or when buffered bytes exceed threshold
+- rotate when file reaches configured max size
+- rotating file set: `flight_log_0.txt ... flight_log_3.txt`
+
+This gives bounded on-card growth and periodic durability without synchronous blocking in normal tasks.
+
+---
+
+## Phase 5: RTOS Migration (From Superloop to Task Ownership)
+
+**Goal:** remove half-superloop/half-RTOS ambiguity.
+
+### What changed
+
+- old superloop runtime behavior moved into task-owned execution in `freertos.c`
+- `main.c` is now init + scheduler start + HAL callback bridges
+- task cadences now use deliberate scheduling:
+  - `vTaskDelayUntil()` for periodic tasks
+  - task notification wake for command task (`CommTask`) from UART RX callback
+- watchdog supervision now uses per-task heartbeats, not blind refreshing
+- shared runtime state moved into dedicated modules:
+  - `Runtime_State` (ADC cache, telemetry counters)
+  - `Runtime_Resources` (radio/G2S/runtime objects)
+
+### Why this matters
+
+- clearer task ownership
+- fewer hidden races
+- better fault semantics (watchdog tied to whole-system liveness)
+
+---
+
+## 6) Module Deep Dive
+
+### UART Driver
+
+Non-blocking DMA TX with channelized transport:
+
+- console channel (`USART2`)
+- telemetry channel (`USART1`)
+
+TX queues are ring-buffered per channel, DMA staged, and advanced in callbacks.
 
 ### Telemetry
-Purpose: frame binary status data on `USART1` so observability stays machine-readable and separate from the console.
 
-Current packet coverage:
+Frame queue + process loop:
 
-- `TELEM_ID_SYSTEM_STATUS`
-- `TELEM_ID_ADC_HEALTH`
-- `TELEM_ID_HEARTBEAT`
-- `TELEM_ID_EVENT`
-- `TELEM_ID_COMMAND_ACK`
+- build frame
+- enqueue
+- process via telemetry channel writer
+- maintain stats for queue pressure and transport health
 
-Timestamp policy:
+### Logger
 
-- `TelemetryFrame_t.timestamp` is a `uint32_t`
-- when RTC holds a non-default value, the field contains seconds since `2000-01-01 00:00:00`
-- when RTC is still at the CubeMX default epoch or an RTC read fails, the field falls back to uptime seconds
-- telemetry stats record whether the most recent frame used RTC time or uptime fallback
+- formatted timestamped messages
+- mutex-protected console write section under RTOS
+- tracks attempted/dropped console writes
+- tracks persistent enqueue failures via storage status
 
-Observability features:
+### ADC Monitor
 
-- queue depth, peak depth, queued/sent/dropped counters
-- retry accounting for telemetry TX backpressure
-- transport error counters
-- RTC fallback counters
-- last enqueue/process status snapshots for bench correlation
+DMA-based continuous sampling:
 
-### Ring Buffer
-Purpose: provide reusable FIFO infrastructure for both byte streams and fixed-size frame queues.
+- `VREFINT`
+- internal temp sensor
+- battery input
 
-Byte ring buffer features:
+Converts raw values into engineering units and exposes statused read API.
 
-- fixed capacity `RING_BUFFER_SIZE = 256`
-- usable byte capacity is `255`
-- used for:
-  - console RX bytes
-  - per-channel UART TX queues
+### Command System
 
-Frame queue features:
+Table-driven command dispatch:
 
-- stores whole objects rather than bytes
-- used by telemetry to queue complete `TelemetryFrame_t` packets
-- `TELEM_QUEUE_SIZE = 9`, so usable queued frames are `8`
+- `PING`
+- `GET_ADC`
+- `SET_RATE <value>`
+- `PWR_STATUS`
+- `PWR_SIM <AUTO|SUNLIGHT|ECLIPSE>`
+- `PWR_POLICY <MONITOR|SLEEP|FULL>`
+- `SD_STATUS`
+- `SD_TEST`
 
-Important implementation details:
+### Storage Service
 
-- `RingBuffer_PushArray()` now pre-checks space before writing
-- `RingBuffer_PopArray()` correctly drains available data into a caller buffer
-- `FrameQueue_Push()` / `FrameQueue_Pop()` copy whole telemetry frames in and out
+Queue-driven SD owner with two request classes:
 
-## 4. Command Interface
-Input format:
+- synchronous command requests (`SD_STATUS`, `SD_TEST`) via command queue + response flag
+- asynchronous persistent log records via log queue
 
-- ASCII commands over `USART2`
-- space-delimited tokens
-- terminated by `\r`, `\n`, or both
+---
 
-Output format:
+## 7) Current Data Flows
 
-- readable text responses on `USART2`
-- logger and command replies share the same console UART
+### Console command path
 
-Current commands:
+`USART2 RX ISR -> UART RX ring -> CommTask -> Command parser/dispatch -> response + ACK telemetry`
 
-- `PING`: connectivity check
-- `GET_ADC`: prints `VDDA`, `TEMP`, and `BATT`
-- `SET_RATE <int>`: validated example configuration command with argument checking
-- `PWR_STATUS`: prints the current IPMS state, simulation mode, policy, and wake source
-- `PWR_SIM <AUTO|SUNLIGHT|ECLIPSE>`: changes the simulated power environment for bench testing
-- `PWR_POLICY <MONITOR|SLEEP|FULL>`: selects whether IPMS only monitors, may sleep, or may sleep/stop
+### Telemetry path
 
-## 5. Peripheral Configuration
+`App events/status -> Telemetry queue -> TelemetryRadioTask -> UART telemetry channel DMA TX`
 
-- `USART2`: `115200`, CLI/logger text, RX interrupt, DMA TX required
-- `USART1`: `57600`, binary telemetry, DMA TX configured
-- `ADC1`: scan mode, continuous conversion, circular DMA on `DMA2_Stream0`
-- `SPI1`: initialized with DMA scaffolding
-- `PC5`: LoRa chip select (`LORA_CS`)
-- `I2C1`: initialized with RX DMA scaffolding
-- `RTC`: enabled; telemetry frame timestamps now encode seconds since `2000-01-01 00:00:00`, with uptime-seconds fallback if RTC reads fail
-- `RTC Wakeup`: used by IPMS for timed sleep/stop exit
+### Power path
 
-## 6. Data Flow Explanation
+`ADC DMA -> ADC monitor -> HealthPowerTask -> IPMS state machine -> optional low-power action`
 
-Console path:
+### Persistent logging path
 
-`USART2 RX IRQ -> HAL_UART_RxCpltCallback() -> UART_RxCpltCallback() -> RX ring buffer -> CommandParser_Process() -> command handler -> Logger/UART_Write() -> USART2 DMA TX`
+`Logger format -> UART console write + StorageService log enqueue -> StorageLogTask append/flush/rotate`
 
-Telemetry path:
+---
 
-`Telemetry_SendSystemStatus() / Telemetry_QueuePacket() -> Telemetry_BuildFrame() -> FrameQueue_Push() -> Telemetry_Process() -> UART_WriteChannel(UART_DRIVER_CHANNEL_TELEMETRY, ...) -> USART1 DMA TX`
+## 8) Build + Run
 
-ADC path:
+### Build
 
-`ADC1 -> DMA circular buffer -> HAL_ADC_ConvCpltCallback() -> ADC monitor update -> CLI/log query`
+- Open project in STM32CubeIDE
+- Regenerate from `.ioc` if needed
+- Build `Debug`
 
-Radio command path:
+### Runtime prerequisites
 
-`SX1278 RX polling -> G2S packet validation -> shared command dispatch -> command ACK packet build -> SX1278 TX -> return to RX continuous`
+- CLI terminal on `USART2`
+- telemetry listener on `USART1`
+- SD card inserted for storage tests
+- LoRa hardware connected for G2S/radio tests
 
-## 7. Design Decisions
+---
 
-- interrupt RX on `USART2` keeps CLI input responsive with minimal ISR work
-- DMA TX is used to avoid blocking console/telemetry transmits in the superloop
-- separate UART channels prevent binary telemetry from corrupting the human-readable console
-- a command table keeps CLI growth manageable
-- a superloop remains the execution model for now; no RTOS scheduler is active
-- the G2S link uses the SX1278 polling path for now because no radio DIO IRQ pins are configured in the current hardware map
-- the G2S link is intentionally fixed-size and 32-bit aligned so it can use the STM32 hardware CRC peripheral efficiently
-- IPMS evaluates power policy in the superloop, keeping ISR work minimal and wakeup handling explicit
-- low-power transitions are opt-in through IPMS policy mode so power-management testing does not surprise normal bring-up
+## 9) Test Documentation Map
 
-## 8. CRC Policy
+- Phase 2 radio/G2S bench: `PHASE2_TESTING.md`
+- SDIO + SD card setup/validation: `SDIO_TESTING.md`
+- Phase 3 IPMS bench: `PHASE3_IPMS_TESTING.md`
+- RTOS migration architecture: `RTOS_ARCHITECTURE.md`
+- Phase 5 RTOS regression: `PHASE5_RTOS_TESTING.md`
+- roadmap and completion framing: `PLAN.md`
 
-The internal telemetry path and the G2S radio protocol both use the STM32 hardware CRC peripheral.
+---
 
-Why this project uses hardware CRC for G2S:
+## 10) What Is Source-Integrated vs Bench-Verified
 
-- the STM32F446 already has a dedicated CRC peripheral enabled
-- the existing telemetry stack already depends on it
-- the hardware unit is fast, deterministic, and well-suited to repetitive packet validation
+### Integrated at source/build level
 
-Protocol consequence:
+- RTOS task ownership model
+- dual-UART transport split
+- telemetry framing and queueing
+- ADC/IPMS runtime integration
+- storage service and persistent log queue path
+- watchdog heartbeat supervision
 
-- the first G2S protocol revision uses `CRC-32`, not `CRC-16`
-- packet layout is fixed-size and 32-bit aligned so `HAL_CRC_Calculate()` can be used directly over the packet region excluding the CRC field
-- this is a deliberate redesign of the radio protocol around the supported hardware polynomial instead of adding a separate software CRC-16 path
+### Still requiring hardware verification focus
 
-## 9. Current System Status
+- end-to-end radio round-trip resilience in real RF conditions
+- long-duration SD logging endurance under power/transient events
+- low-power wake/restore behavior under full subsystem load
 
-Fully working at source/runtime integration level:
+---
 
-- console UART RX on `USART2`
-- non-blocking DMA TX on both UART channels
-- logger output on `USART2`
-- telemetry frame queueing and binary TX on `USART1`
-- ADC monitoring with DMA
-- command parser and command dispatch in the main loop
-- watchdog refresh in the main loop
-- OLED initialization and screen updates on `I2C1`
-- startup status logging that reports UART, ADC, telemetry, I2C, and OLED bring-up state
-- telemetry and logger stats reporting that expose queue pressure, drops, retries, and timestamp-source fallback behavior
-- SX1278 device-layer initialization and register readback at source/build level
-- G2S packet parsing, CRC validation, and command-to-ACK flow at source/build level
-- IPMS battery-state evaluation with hysteresis and sample windows
-- simulated sunlight/eclipse test hooks through the command interface
-- RTC wakeup and user-button wake handling for sleep/stop transitions
-- telemetry and logger event reporting for IPMS state, mode, and wakeup events
+## 11) Known Constraints
 
-Partially implemented or still early-stage:
+- RTC starts at default epoch unless explicitly set, so timestamp fallback behavior is still relevant on cold boot
+- SX1278 path is polling-oriented in current hardware configuration
+- fixed-size queues/buffers mean burst overload is handled by drop/backpressure status, not unbounded blocking
 
-- physical radio link validation on hardware
-- I2C feature-level validation
-- SD card / FatFs runtime integration
-- richer telemetry payloads and scheduling
-- OLED driver completeness
+---
 
-## 10. Known Limitations / Issues
+## 12) Suggested Next Steps
 
-- RTC is still reset to the default epoch on boot in CubeMX-generated `rtc.c`, so both logger and telemetry fall back to boot-relative time until RTC is explicitly set
-- ring buffers are fixed-size, so sustained bursts beyond available queue space still return an error instead of blocking
-- no RTOS-aware locking exists yet around logger/UART usage beyond interrupt masking
-- the current hardware map exposes `LORA_CS` but not a dedicated SX1278 reset or DIO interrupt pin, so radio operation is polling-based
-- radio round-trip behavior, CRC rejection, and over-the-air command ACK flow still need bench verification
-- stop-mode restore currently reinitializes the core runtime peripherals, UART bindings, ADC monitor, and radio path; future subsystems such as SD/FatFs will need their own restore hooks
-- RTC wakeup timing is deterministic, but the RTC still starts from the default epoch unless a real time-set flow is added
+1. Add RTC set/get command workflow to anchor real timestamps early in bring-up.
+2. Extend storage stats reporting into a command (`SD_LOG_STATS`) for faster bench visibility.
+3. Add radio DIO interrupt wiring path to move from polling to event-driven RX/TX signaling.
+4. Add reset-cause + last-fault persistence to strengthen watchdog/post-mortem diagnostics.
 
-## 11. Future Work / Roadmap
-
-- add CLI commands for telemetry status, RTC set/read, and fault reporting
-- validate SPI-based radio integration
-- run the bench checklist in `PHASE2_TESTING.md`
-- complete SD card + FatFs support
-- add watchdog fault reporting and reset-cause diagnostics
-- decide whether to remain superloop-based or migrate cleanly to FreeRTOS
-
-## 12. Code Quality Assessment
-
-- Modularity: good. The UART split and channelized transport preserve clean module boundaries.
-- Scalability: improved. Multiple logical UART channels now fit naturally without pushing HAL details into application modules.
-- Safety: improved. TX no longer blocks, ISR work remains short, and telemetry is isolated from the console path.
-- Embedded best practices: solid direction. DMA TX, interrupt RX, fixed buffers, and explicit driver ownership of callback state are good architectural choices.
-
-## 13. Suggested Improvements
-
-- remove deprecated telemetry transport API pieces after call sites are cleaned up
-- document UART channel usage directly in code comments near initialization
-- add explicit queue depth and dropped-write diagnostics for both UART channels
-- consider a small RTOS-safe lock strategy if multi-tasked logging/telemetry is added later
-- tighten logger timestamp policy so logs stay clearly boot-relative until RTC is explicitly set
-- add a dedicated SX1278 reset pin and DIO interrupt wiring in CubeMX so the radio can move from polling to event-driven handling
