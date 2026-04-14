@@ -127,13 +127,13 @@ int main(void)
   MX_RTC_Init();
   MX_FATFS_Init();
   /* USER CODE BEGIN 2 */
-  I2C_Bus_Handle_t *i2c_bus = RuntimeResources_GetI2CBus();
-  OLED_HandleTypeDef *oled = RuntimeResources_GetOled();
-  SX1278_Handle_t *radio = RuntimeResources_GetRadio();
-  G2S_Link_Handle_t *g2s_link = RuntimeResources_GetG2SLink();
-  IPMS_Config_t *ipms_config = RuntimeResources_GetIpmsConfig();
-  SystemRuntimeContext_t *runtime_context = RuntimeResources_GetSystemRuntimeContext();
-  SystemRuntimeHooks_t *runtime_hooks = RuntimeResources_GetSystemRuntimeHooks();
+  I2C_Bus_Handle_t *i2c_bus;
+  OLED_HandleTypeDef *oled;
+  SX1278_Handle_t *radio;
+  G2S_Link_Handle_t *g2s_link;
+  IPMS_Config_t *ipms_config;
+  SystemRuntimeContext_t *runtime_context;
+  SystemRuntimeHooks_t *runtime_hooks;
 
   RuntimeResources_Init();
   i2c_bus = RuntimeResources_GetI2CBus();

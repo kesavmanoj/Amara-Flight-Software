@@ -22,6 +22,7 @@ static UART_ChannelState_t uart_channels[UART_DRIVER_CHANNEL_COUNT];
 static UART_HandleTypeDef *pConsoleUart = NULL;
 static RingBuffer_t rx_buffer;
 static uint8_t rx_byte;
+static volatile uint32_t rx_overflow_count = 0U;
 
 static uint32_t UART_EnterCritical(void)
 {
@@ -80,13 +81,13 @@ static UART_ChannelState_t *UART_FindChannel(UART_HandleTypeDef *huart)
  * 3. HAL_UART_Transmit_DMA() sends the chunk asynchronously on that UART.
  * 4. HAL_UART_TxCpltCallback() clears the channel's dma_busy flag and starts the next chunk.
  */
-static void UART_StartTxDMA(UART_ChannelState_t *channel)
+static UART_Driver_Status_t UART_StartTxDMA(UART_ChannelState_t *channel)
 {
 	uint16_t chunk_len = 0U;
 	bool start_transfer = false;
 
 	if((channel == NULL) || (channel->huart == NULL)){
-		return;
+		return UART_DRIVER_INVALID_PARAM;
 	}
 
 	/*
@@ -97,7 +98,7 @@ static void UART_StartTxDMA(UART_ChannelState_t *channel)
 
 	if(channel->dma_busy != 0U){
 		UART_ExitCritical(primask);
-		return;
+		return UART_DRIVER_OK;
 	}
 
 	if(channel->tx_dma_len == 0U){
@@ -112,7 +113,7 @@ static void UART_StartTxDMA(UART_ChannelState_t *channel)
 	UART_ExitCritical(primask);
 
 	if(!start_transfer){
-		return;
+		return UART_DRIVER_OK;
 	}
 
 	/*
@@ -120,14 +121,17 @@ static void UART_StartTxDMA(UART_ChannelState_t *channel)
 	 * succeeds. If HAL returns busy/error, the same chunk will be retried on
 	 * the next UART_Write() or UART callback without losing ordering.
 	 */
-	if(HAL_UART_Transmit_DMA(channel->huart, channel->tx_dma_buffer, chunk_len) == HAL_OK){
+	HAL_StatusTypeDef hal_status = HAL_UART_Transmit_DMA(channel->huart, channel->tx_dma_buffer, chunk_len);
+	if(hal_status == HAL_OK){
 		primask = UART_EnterCritical();
 		channel->tx_dma_len = 0U;
 		UART_ExitCritical(primask);
+		return UART_DRIVER_OK;
 	} else {
 		primask = UART_EnterCritical();
 		channel->dma_busy = 0U;
 		UART_ExitCritical(primask);
+		return (hal_status == HAL_BUSY) ? UART_DRIVER_BUSY : UART_DRIVER_ERROR;
 	}
 }
 
@@ -157,8 +161,10 @@ UART_Driver_Status_t UART_Driver_InitChannel(UART_Driver_Channel_t channel, UART
 	if(channel == UART_DRIVER_CHANNEL_CONSOLE){
 		RingBuffer_Init(&rx_buffer);
 		pConsoleUart = huart;
+		rx_overflow_count = 0U;
 
-		if(HAL_UART_Receive_IT(pConsoleUart, &rx_byte, 1) != HAL_OK) return UART_DRIVER_ERROR;
+		HAL_StatusTypeDef hal_status = HAL_UART_Receive_IT(pConsoleUart, &rx_byte, 1);
+		if(hal_status != HAL_OK) return (hal_status == HAL_BUSY) ? UART_DRIVER_BUSY : UART_DRIVER_ERROR;
 	}
 
 	return UART_DRIVER_OK;
@@ -173,6 +179,10 @@ uint16_t UART_Available(void){
 	return RingBuffer_Available(&rx_buffer);
 }
 
+uint32_t UART_GetRxOverflowCount(void){
+	return rx_overflow_count;
+}
+
 // TX
 UART_Driver_Status_t UART_Write(uint8_t *data, uint16_t len){
 	return UART_WriteChannel(UART_DRIVER_CHANNEL_CONSOLE, data, len);
@@ -181,6 +191,7 @@ UART_Driver_Status_t UART_Write(uint8_t *data, uint16_t len){
 UART_Driver_Status_t UART_WriteChannel(UART_Driver_Channel_t channel, uint8_t *data, uint16_t len){
 	uint32_t primask;
 	UART_ChannelState_t *state = UART_GetChannel(channel);
+	UART_Driver_Status_t start_status;
 
 	if(state == NULL) return UART_DRIVER_INVALID_PARAM;
 	if(state->huart == NULL) return UART_DRIVER_NOT_INITIALIZED;
@@ -194,7 +205,13 @@ UART_Driver_Status_t UART_WriteChannel(UART_Driver_Channel_t channel, uint8_t *d
 	}
 	UART_ExitCritical(primask);
 
-	UART_StartTxDMA(state);
+	start_status = UART_StartTxDMA(state);
+	if(start_status == UART_DRIVER_ERROR){
+		return UART_DRIVER_ERROR;
+	}
+	if(start_status == UART_DRIVER_BUSY){
+		return UART_DRIVER_BUSY;
+	}
 
 	return UART_DRIVER_OK;
 }
@@ -231,7 +248,9 @@ void UART_RxCpltCallback(UART_HandleTypeDef *huart)
         return;
 
     /* Store byte ONLY */
-    RingBuffer_Push(&rx_buffer, rx_byte);
+    if(!RingBuffer_Push(&rx_buffer, rx_byte)){
+    	rx_overflow_count++;
+    }
 
     /* Restart RX */
     if (HAL_UART_Receive_IT(pConsoleUart, &rx_byte, 1) != HAL_OK)
@@ -281,7 +300,6 @@ void UART_ErrorCallback(UART_HandleTypeDef *huart)
 
 	UART_StartTxDMA(state);
 }
-
 
 
 

@@ -35,6 +35,7 @@ UART_Driver_Status_t UART_Driver_InitChannel(UART_Driver_Channel_t channel, UART
 // RX
 bool UART_ReadByte(uint8_t *data);
 uint16_t UART_Available(void);
+uint32_t UART_GetRxOverflowCount(void);
 
 // TX
 UART_Driver_Status_t UART_Write(uint8_t *data, uint16_t len);

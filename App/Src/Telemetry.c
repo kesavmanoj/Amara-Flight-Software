@@ -32,6 +32,7 @@ static TelemetryFrame_t tx_frame;
 static FrameQueue_t telem_queue;
 
 static bool frame_pending = false;
+static bool process_active = false;
 static volatile uint32_t g_telem_queued_frames = 0U;
 static volatile uint32_t g_telem_sent_frames = 0U;
 static volatile uint32_t g_telem_dropped_frames = 0U;
@@ -42,6 +43,36 @@ static volatile uint16_t g_telem_max_queue_depth = 0U;
 static volatile Telemetry_Status_t g_telem_last_enqueue_status = TELEM_STATUS_NOT_INITIALIZED;
 static volatile Telemetry_Status_t g_telem_last_process_status = TELEM_STATUS_NOT_INITIALIZED;
 static volatile TelemetryTimestampSource_t g_telem_last_timestamp_source = TELEM_TIMESTAMP_SOURCE_UPTIME_FALLBACK;
+
+static uint32_t Telemetry_EnterCritical(void)
+{
+	uint32_t primask = __get_PRIMASK();
+	__disable_irq();
+	return primask;
+}
+
+static void Telemetry_ExitCritical(uint32_t primask)
+{
+	if(primask == 0U){
+		__enable_irq();
+	}
+}
+
+static Telemetry_Status_t Telemetry_SetEnqueueStatus(Telemetry_Status_t status)
+{
+	uint32_t primask = Telemetry_EnterCritical();
+	g_telem_last_enqueue_status = status;
+	Telemetry_ExitCritical(primask);
+	return status;
+}
+
+static Telemetry_Status_t Telemetry_SetProcessStatus(Telemetry_Status_t status)
+{
+	uint32_t primask = Telemetry_EnterCritical();
+	g_telem_last_process_status = status;
+	Telemetry_ExitCritical(primask);
+	return status;
+}
 
 static bool Telemetry_IsLeapYear(uint32_t year)
 {
@@ -120,7 +151,7 @@ static bool Telemetry_IsValidPacketId(TelemetryPacketID_t id)
 	}
 }
 
-static void Telemetry_UpdateQueueDepthPeak(void)
+static void Telemetry_UpdateQueueDepthPeakLocked(void)
 {
 	uint16_t depth = FrameQueue_Count(&telem_queue);
 
@@ -129,17 +160,13 @@ static void Telemetry_UpdateQueueDepthPeak(void)
 	}
 }
 
-static void Telemetry_BuildFrame(TelemetryFrame_t *frame, TelemetryPacketID_t id, uint8_t *payload, uint16_t len){
+static void Telemetry_BuildFrame(TelemetryFrame_t *frame, CRC_HandleTypeDef *crc, TelemetryPacketID_t id, uint8_t *payload, uint16_t len){
 	TelemetryTimestampSource_t timestamp_source = TELEM_TIMESTAMP_SOURCE_UPTIME_FALLBACK;
+	uint32_t primask;
 
 	frame -> sync_word = TELEM_SYNC_WORD;
 	frame -> timestamp = Telemetry_GetRtcTimestampSeconds(&timestamp_source);
 	frame -> packet_id = (uint8_t)id;
-	g_telem_last_timestamp_source = timestamp_source;
-
-	if(timestamp_source == TELEM_TIMESTAMP_SOURCE_UPTIME_FALLBACK){
-		g_telem_rtc_fallback_count++;
-	}
 
 	memset(frame -> payload, 0, TELEM_PAYLOAD_SIZE);
 
@@ -149,16 +176,27 @@ static void Telemetry_BuildFrame(TelemetryFrame_t *frame, TelemetryPacketID_t id
 
 	uint32_t word_count = (sizeof(TelemetryFrame_t) - sizeof(uint32_t)) / 4;
 
-	frame -> crc = HAL_CRC_Calculate(pCrc, (uint32_t *)frame, word_count);
+	frame -> crc = HAL_CRC_Calculate(crc, (uint32_t *)frame, word_count);
+
+	primask = Telemetry_EnterCritical();
+	g_telem_last_timestamp_source = timestamp_source;
+	if(timestamp_source == TELEM_TIMESTAMP_SOURCE_UPTIME_FALLBACK){
+		g_telem_rtc_fallback_count++;
+	}
+	Telemetry_ExitCritical(primask);
 
 }
 
 void Telemetry_Init(CRC_HandleTypeDef *hcrc){
+	uint32_t primask = Telemetry_EnterCritical();
+
 	if(hcrc == NULL){
 		pCrc = NULL;
 		frame_pending = false;
+		process_active = false;
 		g_telem_last_enqueue_status = TELEM_STATUS_NOT_INITIALIZED;
 		g_telem_last_process_status = TELEM_STATUS_NOT_INITIALIZED;
+		Telemetry_ExitCritical(primask);
 		return;
 	}
 
@@ -166,6 +204,7 @@ void Telemetry_Init(CRC_HandleTypeDef *hcrc){
 
 	FrameQueue_Init(&telem_queue, (uint8_t *)frame_buffer, sizeof(TelemetryFrame_t), TELEM_QUEUE_SIZE);
 	frame_pending = false;
+	process_active = false;
 	memset(&tx_frame, 0, sizeof(tx_frame));
 	g_telem_queued_frames = 0U;
 	g_telem_sent_frames = 0U;
@@ -177,41 +216,47 @@ void Telemetry_Init(CRC_HandleTypeDef *hcrc){
 	g_telem_last_enqueue_status = TELEM_STATUS_OK;
 	g_telem_last_process_status = TELEM_STATUS_IDLE;
 	g_telem_last_timestamp_source = TELEM_TIMESTAMP_SOURCE_UPTIME_FALLBACK;
+	Telemetry_ExitCritical(primask);
 
 }
 
 
 Telemetry_Status_t Telemetry_QueuePacketEx(TelemetryPacketID_t id, uint8_t* payload, uint16_t len){
+	CRC_HandleTypeDef *crc_handle;
+	uint32_t primask;
 
-	if(pCrc == NULL){
-		g_telem_last_enqueue_status = TELEM_STATUS_NOT_INITIALIZED;
-		return TELEM_STATUS_NOT_INITIALIZED;
+	primask = Telemetry_EnterCritical();
+	crc_handle = pCrc;
+	Telemetry_ExitCritical(primask);
+
+	if(crc_handle == NULL){
+		return Telemetry_SetEnqueueStatus(TELEM_STATUS_NOT_INITIALIZED);
 	}
 	if(!Telemetry_IsValidPacketId(id)){
-		g_telem_last_enqueue_status = TELEM_STATUS_INVALID_PACKET_ID;
-		return TELEM_STATUS_INVALID_PACKET_ID;
+		return Telemetry_SetEnqueueStatus(TELEM_STATUS_INVALID_PACKET_ID);
 	}
 	if((payload == NULL) && (len > 0U)){
-		g_telem_last_enqueue_status = TELEM_STATUS_INVALID_PARAM;
-		return TELEM_STATUS_INVALID_PARAM;
+		return Telemetry_SetEnqueueStatus(TELEM_STATUS_INVALID_PARAM);
 	}
 	if(len > TELEM_PAYLOAD_SIZE){
-		g_telem_last_enqueue_status = TELEM_STATUS_INVALID_PARAM;
-		return TELEM_STATUS_INVALID_PARAM;
+		return Telemetry_SetEnqueueStatus(TELEM_STATUS_INVALID_PARAM);
 	}
 
 	TelemetryFrame_t frame;
-	Telemetry_BuildFrame(&frame, id, payload, len);
+	Telemetry_BuildFrame(&frame, crc_handle, id, payload, len);
 
+	primask = Telemetry_EnterCritical();
 	if(!FrameQueue_Push(&telem_queue, &frame)){
 		g_telem_dropped_frames++;
 		g_telem_last_enqueue_status = TELEM_STATUS_QUEUE_FULL;
+		Telemetry_ExitCritical(primask);
 		return TELEM_STATUS_QUEUE_FULL;
 	}
 
 	g_telem_queued_frames++;
-	Telemetry_UpdateQueueDepthPeak();
+	Telemetry_UpdateQueueDepthPeakLocked();
 	g_telem_last_enqueue_status = TELEM_STATUS_OK;
+	Telemetry_ExitCritical(primask);
 
 	return TELEM_STATUS_OK;
 
@@ -224,37 +269,59 @@ bool Telemetry_QueuePacket(TelemetryPacketID_t id, uint8_t *payload, uint16_t le
 
 Telemetry_Status_t Telemetry_ProcessStep(void){
 	UART_Driver_Status_t uart_status;
+	CRC_HandleTypeDef *crc_handle;
+	uint32_t primask;
 
-	if(pCrc == NULL){
-		g_telem_last_process_status = TELEM_STATUS_NOT_INITIALIZED;
-		return TELEM_STATUS_NOT_INITIALIZED;
+	primask = Telemetry_EnterCritical();
+	crc_handle = pCrc;
+	Telemetry_ExitCritical(primask);
+
+	if(crc_handle == NULL){
+		return Telemetry_SetProcessStatus(TELEM_STATUS_NOT_INITIALIZED);
 	}
+
+	primask = Telemetry_EnterCritical();
+	if(process_active){
+		g_telem_tx_busy_retries++;
+		g_telem_last_process_status = TELEM_STATUS_TX_BUSY;
+		Telemetry_ExitCritical(primask);
+		return TELEM_STATUS_TX_BUSY;
+	}
+	process_active = true;
 
 	if(!frame_pending){
 		if(!FrameQueue_Pop(&telem_queue, &tx_frame)){
+			process_active = false;
 			g_telem_last_process_status = TELEM_STATUS_IDLE;
+			Telemetry_ExitCritical(primask);
 			return TELEM_STATUS_IDLE;
 		}
 
 		frame_pending = true;
 	}
+	Telemetry_ExitCritical(primask);
 
 	uart_status = UART_WriteChannel(UART_DRIVER_CHANNEL_TELEMETRY, (uint8_t *)&tx_frame, sizeof(tx_frame));
+	primask = Telemetry_EnterCritical();
+	process_active = false;
 	if(uart_status == UART_DRIVER_OK){
 		frame_pending = false;
 		g_telem_sent_frames++;
 		g_telem_last_process_status = TELEM_STATUS_OK;
+		Telemetry_ExitCritical(primask);
 		return TELEM_STATUS_OK;
 	}
 
 	if((uart_status == UART_DRIVER_BUSY) || (uart_status == UART_DRIVER_BUFFER_FULL)){
 		g_telem_tx_busy_retries++;
 		g_telem_last_process_status = TELEM_STATUS_TX_BUSY;
+		Telemetry_ExitCritical(primask);
 		return TELEM_STATUS_TX_BUSY;
 	}
 
 	g_telem_transport_errors++;
 	g_telem_last_process_status = TELEM_STATUS_TRANSPORT_ERROR;
+	Telemetry_ExitCritical(primask);
 	return TELEM_STATUS_TRANSPORT_ERROR;
 }
 
@@ -335,15 +402,18 @@ bool Telemetry_SendEvent(TelemetryEventCode_t event_code, uint32_t event_value)
 Telemetry_Status_t Telemetry_SendHeartbeatEx(void)
 {
     TelemetryHeartbeatPayload_t payload;
+    uint32_t primask;
 
     if(sizeof(payload) > TELEM_PAYLOAD_SIZE){
         return TELEM_STATUS_INVALID_PARAM;
     }
 
+    primask = Telemetry_EnterCritical();
     payload.uptime_ms = HAL_GetTick();
     payload.queue_depth = FrameQueue_Count(&telem_queue);
     payload.frame_pending = frame_pending ? 1U : 0U;
     payload.reserved = 0U;
+    Telemetry_ExitCritical(primask);
 
     return Telemetry_QueuePacketEx(
         TELEM_ID_HEARTBEAT,
@@ -384,11 +454,14 @@ bool Telemetry_SendCommandAck(uint8_t command_id, int8_t status_code, uint32_t a
 
 void Telemetry_GetStats(TelemetryStats_t *stats)
 {
+    uint32_t primask;
+
     if (stats == NULL)
     {
         return;
     }
 
+    primask = Telemetry_EnterCritical();
     stats->queue_depth = FrameQueue_Count(&telem_queue);
     stats->queue_capacity = (uint16_t)(TELEM_QUEUE_SIZE - 1U);
     stats->max_queue_depth = g_telem_max_queue_depth;
@@ -402,6 +475,7 @@ void Telemetry_GetStats(TelemetryStats_t *stats)
     stats->last_enqueue_status = g_telem_last_enqueue_status;
     stats->last_process_status = g_telem_last_process_status;
     stats->last_timestamp_source = g_telem_last_timestamp_source;
+    Telemetry_ExitCritical(primask);
 }
 
 const char *Telemetry_StatusToString(Telemetry_Status_t status)
@@ -426,5 +500,3 @@ const char *Telemetry_StatusToString(Telemetry_Status_t status)
 		return "TRANSPORT_ERROR";
 	}
 }
-
-
