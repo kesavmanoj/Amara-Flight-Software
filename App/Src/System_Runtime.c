@@ -10,6 +10,10 @@
 #include "Logger.h"
 #include "Runtime_State.h"
 #include "UART_Driver.h"
+#include <string.h>
+
+#define SYSTEM_RUNTIME_LOW_POWER_REASSESS_MAX_SAMPLES  8U
+#define SYSTEM_RUNTIME_LOW_POWER_SAMPLE_WAIT_MS       150U
 
 static uint32_t SystemRuntime_PackIpmsEventValue(const IPMS_Event_t *event)
 {
@@ -118,7 +122,7 @@ void SystemRuntime_ReportIpmsEvents(void)
     }
 }
 
-void SystemRuntime_PrepareForLowPower(SystemRuntimeContext_t *context)
+static void SystemRuntime_PrepareForLowPowerInternal(SystemRuntimeContext_t *context, bool include_radio_sleep)
 {
     if (context == NULL)
     {
@@ -126,11 +130,16 @@ void SystemRuntime_PrepareForLowPower(SystemRuntimeContext_t *context)
     }
 
     (void)ADC_Monitor_Stop();
-    if (context->radio != NULL)
+    if (include_radio_sleep && (context->radio != NULL))
     {
         (void)SX1278_SetMode(context->radio, SX1278_MODE_SLEEP);
     }
     RuntimeState_InvalidateLatestAdcSample();
+}
+
+void SystemRuntime_PrepareForLowPower(SystemRuntimeContext_t *context)
+{
+    SystemRuntime_PrepareForLowPowerInternal(context, true);
 }
 
 void SystemRuntime_RestoreAfterSleep(SystemRuntimeContext_t *context)
@@ -246,48 +255,189 @@ void SystemRuntime_RestoreAfterStop(SystemRuntimeContext_t *context, const Syste
                 SX1278_StatusToString(radio_status));
 }
 
+static void SystemRuntime_RestoreAfterStopMinimal(SystemRuntimeContext_t *context, const SystemRuntimeHooks_t *hooks)
+{
+    if ((context == NULL) || (hooks == NULL))
+    {
+        return;
+    }
+
+    if (hooks->SystemClock_Config != NULL)
+    {
+        hooks->SystemClock_Config();
+    }
+    HAL_ResumeTick();
+
+    if (hooks->MX_DMA_Init != NULL)
+    {
+        hooks->MX_DMA_Init();
+    }
+
+    if (hooks->MX_ADC1_Init != NULL)
+    {
+        hooks->MX_ADC1_Init();
+    }
+
+    if (context->hadc != NULL)
+    {
+        (void)ADC_Monitor_Init(context->hadc);
+        (void)ADC_Monitor_Start();
+    }
+
+    RuntimeState_InvalidateLatestAdcSample();
+}
+
+static bool SystemRuntime_WaitForAdcSample(ADC_HealthData_t *sample, uint32_t timeout_ms)
+{
+    uint32_t start_ms;
+
+    if (sample == NULL)
+    {
+        return false;
+    }
+
+    start_ms = HAL_GetTick();
+    while ((HAL_GetTick() - start_ms) < timeout_ms)
+    {
+        if (ADC_Monitor_GetData(sample) == ADC_MONITOR_OK)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 void SystemRuntime_ExecuteIpmsAction(SystemRuntimeContext_t *context,
                                      const SystemRuntimeHooks_t *hooks,
                                      const IPMS_ActionRequest_t *request)
 {
     IPMS_Status_t rtc_status;
+    IPMS_ActionRequest_t active_request;
+    IPMS_ActionRequest_t next_request;
+    bool stop_runtime_in_minimal_mode = false;
+    bool keep_low_power_looping;
+    bool radio_sleep_already_requested = false;
+    uint32_t sample_idx;
 
     if ((context == NULL) || (request == NULL) || (request->type == IPMS_ACTION_NONE))
     {
         return;
     }
-
-    Logger_Warn("IPMS action: %s duration=%lu ms",
-                IPMS_ActionTypeToString(request->type),
-                (unsigned long)request->duration_ms);
-
-    rtc_status = IPMS_ArmRtcWakeup(context->hrtc, request->duration_ms);
-    if (rtc_status != IPMS_STATUS_OK)
+    if ((request->type == IPMS_ACTION_ENTER_STOP) && (hooks == NULL))
     {
-        Logger_Warn("IPMS wakeup arm failed: %s", IPMS_StatusToString(rtc_status));
+        Logger_Warn("IPMS STOP action skipped: runtime hooks are not configured");
         return;
     }
 
-    SystemRuntime_PrepareForLowPower(context);
-    if (context->hiwdg != NULL)
-    {
-        HAL_IWDG_Refresh(context->hiwdg);
-    }
-    __HAL_PWR_CLEAR_FLAG(PWR_FLAG_WU);
-    HAL_SuspendTick();
+    active_request = *request;
 
-    if (request->type == IPMS_ACTION_ENTER_SLEEP)
+    Logger_Warn("IPMS action: %s duration=%lu ms",
+                IPMS_ActionTypeToString(active_request.type),
+                (unsigned long)active_request.duration_ms);
+
+    for (;;)
     {
-        HAL_PWR_EnterSLEEPMode(PWR_LOWPOWERREGULATOR_ON, PWR_SLEEPENTRY_WFI);
-        HAL_ResumeTick();
-        SystemRuntime_RestoreAfterSleep(context);
-    }
-    else
-    {
+        rtc_status = IPMS_ArmRtcWakeup(context->hrtc, active_request.duration_ms);
+        if (rtc_status != IPMS_STATUS_OK)
+        {
+            Logger_Warn("IPMS wakeup arm failed: %s", IPMS_StatusToString(rtc_status));
+            break;
+        }
+
+        SystemRuntime_PrepareForLowPowerInternal(context, !radio_sleep_already_requested);
+        radio_sleep_already_requested = true;
+
+        if (context->hiwdg != NULL)
+        {
+            HAL_IWDG_Refresh(context->hiwdg);
+        }
+        __HAL_PWR_CLEAR_FLAG(PWR_FLAG_WU);
+        HAL_SuspendTick();
+
+        if (active_request.type == IPMS_ACTION_ENTER_SLEEP)
+        {
+            HAL_PWR_EnterSLEEPMode(PWR_LOWPOWERREGULATOR_ON, PWR_SLEEPENTRY_WFI);
+            HAL_ResumeTick();
+            IPMS_DisarmRtcWakeup(context->hrtc);
+            IPMS_RecordWakeup(IPMS_WAKE_SOURCE_UNKNOWN, HAL_GetTick());
+            SystemRuntime_RestoreAfterSleep(context);
+            break;
+        }
+
         HAL_PWR_EnterSTOPMode(PWR_LOWPOWERREGULATOR_ON, PWR_STOPENTRY_WFI);
+        SystemRuntime_RestoreAfterStopMinimal(context, hooks);
+        IPMS_DisarmRtcWakeup(context->hrtc);
+        IPMS_RecordWakeup(IPMS_WAKE_SOURCE_UNKNOWN, HAL_GetTick());
+        stop_runtime_in_minimal_mode = true;
+
+        keep_low_power_looping = false;
+        memset(&next_request, 0, sizeof(next_request));
+
+        for (sample_idx = 0U; sample_idx < SYSTEM_RUNTIME_LOW_POWER_REASSESS_MAX_SAMPLES; sample_idx++)
+        {
+            ADC_HealthData_t adc_sample;
+
+            if (SystemRuntime_WaitForAdcSample(&adc_sample, SYSTEM_RUNTIME_LOW_POWER_SAMPLE_WAIT_MS))
+            {
+                RuntimeState_SetLatestAdcSample(&adc_sample);
+                (void)IPMS_ProcessBatterySample(adc_sample.battery_voltage, HAL_GetTick());
+            }
+
+            if (IPMS_GetPendingAction(&next_request))
+            {
+                if (next_request.type == IPMS_ACTION_ENTER_STOP)
+                {
+                    keep_low_power_looping = true;
+                    break;
+                }
+                if (next_request.type == IPMS_ACTION_ENTER_SLEEP)
+                {
+                    keep_low_power_looping = true;
+                    next_request.type = IPMS_ACTION_ENTER_STOP;
+                    next_request.duration_ms = active_request.duration_ms;
+                    break;
+                }
+            }
+        }
+
+        if (!keep_low_power_looping)
+        {
+            IPMS_StatusSnapshot_t snapshot;
+
+            memset(&snapshot, 0, sizeof(snapshot));
+            IPMS_GetStatus(&snapshot);
+            if (snapshot.power_state != IPMS_POWER_STATE_NORMAL)
+            {
+                keep_low_power_looping = true;
+                next_request.type = IPMS_ACTION_ENTER_STOP;
+                next_request.duration_ms = active_request.duration_ms;
+                Logger_Warn("IPMS low-power chunk continue: state=%s measured=%.3fV effective=%.3fV",
+                            IPMS_PowerStateToString(snapshot.power_state),
+                            snapshot.measured_battery_voltage,
+                            snapshot.effective_battery_voltage);
+            }
+        }
+
+        if (keep_low_power_looping)
+        {
+            if (next_request.duration_ms == 0U)
+            {
+                next_request.duration_ms = active_request.duration_ms;
+            }
+
+            active_request = next_request;
+            Logger_Warn("IPMS low-power chunk re-entry: action=%s duration=%lu ms",
+                        IPMS_ActionTypeToString(active_request.type),
+                        (unsigned long)active_request.duration_ms);
+            continue;
+        }
+
+        break;
+    }
+
+    if (stop_runtime_in_minimal_mode)
+    {
         SystemRuntime_RestoreAfterStop(context, hooks);
     }
-
-    IPMS_DisarmRtcWakeup(context->hrtc);
-    IPMS_RecordWakeup(IPMS_WAKE_SOURCE_UNKNOWN, HAL_GetTick());
 }

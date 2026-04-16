@@ -10,6 +10,7 @@
 #include "ADC_Monitor.h"
 #include "Telemetry.h"
 #include "IPMS.h"
+#include "Runtime_State.h"
 #include "Storage_Service.h"
 #include "bsp_driver_sd.h"
 
@@ -288,7 +289,6 @@ static Command_Status_t CMD_PWR_STATUS(int argc, char *argv[], Command_Result_t 
 
 static Command_Status_t CMD_PWR_SIM(int argc, char *argv[], Command_Result_t *result)
 {
-	IPMS_Status_t ipms_status;
 	IPMS_SimulationMode_t mode;
 	char response[64];
 
@@ -320,20 +320,21 @@ static Command_Status_t CMD_PWR_SIM(int argc, char *argv[], Command_Result_t *re
 		return COMMAND_STATUS_INVALID_ARGUMENT;
 	}
 
-	ipms_status = IPMS_SetSimulationMode(mode, HAL_GetTick());
-	if(ipms_status != IPMS_STATUS_OK){
-		snprintf(response, sizeof(response), "ERR: IPMS %s\r\n", IPMS_StatusToString(ipms_status));
+	if(!RuntimeState_QueueIpmsControlRequest(RUNTIME_IPMS_CONTROL_SET_SIMULATION_MODE,
+											 (uint32_t)mode,
+											 HAL_GetTick())){
+		snprintf(response, sizeof(response), "ERR: IPMS control queue full\r\n");
 		(void)Command_WriteResponse(response);
 		if(result != NULL){
 			result->ack_status_code = -3;
-			result->argument = (uint32_t)ipms_status;
+			result->argument = (uint32_t)mode;
 			result->status = COMMAND_STATUS_NOT_READY;
 		}
 		Command_SendAck(result);
 		return COMMAND_STATUS_NOT_READY;
 	}
 
-	snprintf(response, sizeof(response), "Power simulation=%s\r\n", IPMS_SimulationModeToString(mode));
+	snprintf(response, sizeof(response), "Power simulation request=%s\r\n", IPMS_SimulationModeToString(mode));
 	(void)Command_WriteResponse(response);
 
 	if(result != NULL){
@@ -348,7 +349,6 @@ static Command_Status_t CMD_PWR_SIM(int argc, char *argv[], Command_Result_t *re
 
 static Command_Status_t CMD_PWR_POLICY(int argc, char *argv[], Command_Result_t *result)
 {
-	IPMS_Status_t ipms_status;
 	IPMS_PolicyMode_t mode;
 	char response[72];
 
@@ -380,20 +380,21 @@ static Command_Status_t CMD_PWR_POLICY(int argc, char *argv[], Command_Result_t 
 		return COMMAND_STATUS_INVALID_ARGUMENT;
 	}
 
-	ipms_status = IPMS_SetPolicyMode(mode, HAL_GetTick());
-	if(ipms_status != IPMS_STATUS_OK){
-		snprintf(response, sizeof(response), "ERR: IPMS %s\r\n", IPMS_StatusToString(ipms_status));
+	if(!RuntimeState_QueueIpmsControlRequest(RUNTIME_IPMS_CONTROL_SET_POLICY_MODE,
+											 (uint32_t)mode,
+											 HAL_GetTick())){
+		snprintf(response, sizeof(response), "ERR: IPMS control queue full\r\n");
 		(void)Command_WriteResponse(response);
 		if(result != NULL){
 			result->ack_status_code = -3;
-			result->argument = (uint32_t)ipms_status;
+			result->argument = (uint32_t)mode;
 			result->status = COMMAND_STATUS_NOT_READY;
 		}
 		Command_SendAck(result);
 		return COMMAND_STATUS_NOT_READY;
 	}
 
-	snprintf(response, sizeof(response), "Power policy=%s\r\n", IPMS_PolicyModeToString(mode));
+	snprintf(response, sizeof(response), "Power policy request=%s\r\n", IPMS_PolicyModeToString(mode));
 	(void)Command_WriteResponse(response);
 
 	if(result != NULL){

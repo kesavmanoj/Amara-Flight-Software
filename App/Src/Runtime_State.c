@@ -8,11 +8,16 @@
 #include "Runtime_State.h"
 #include <string.h>
 
+#define RUNTIME_IPMS_CONTROL_QUEUE_SIZE 8U
+
 typedef struct {
     ADC_HealthData_t latest_adc_sample;
     bool latest_adc_valid;
     uint32_t telem_tx_complete_count;
     uint32_t telem_error_count;
+    RuntimeIpmsControlRequest_t ipms_control_queue[RUNTIME_IPMS_CONTROL_QUEUE_SIZE];
+    uint8_t ipms_control_head;
+    uint8_t ipms_control_tail;
 } RuntimeState_Data_t;
 
 static RuntimeState_Data_t g_runtime_state;
@@ -109,4 +114,57 @@ void RuntimeState_InvalidateLatestAdcSample(void)
     uint32_t primask = RuntimeState_EnterCritical();
     g_runtime_state.latest_adc_valid = false;
     RuntimeState_ExitCritical(primask);
+}
+
+bool RuntimeState_QueueIpmsControlRequest(RuntimeIpmsControlType_t type, uint32_t value, uint32_t timestamp_ms)
+{
+    uint32_t primask;
+    uint8_t next_head;
+    RuntimeIpmsControlRequest_t *slot;
+
+    if ((type != RUNTIME_IPMS_CONTROL_SET_SIMULATION_MODE) &&
+        (type != RUNTIME_IPMS_CONTROL_SET_POLICY_MODE))
+    {
+        return false;
+    }
+
+    primask = RuntimeState_EnterCritical();
+    next_head = (uint8_t)((g_runtime_state.ipms_control_head + 1U) % RUNTIME_IPMS_CONTROL_QUEUE_SIZE);
+    if (next_head == g_runtime_state.ipms_control_tail)
+    {
+        RuntimeState_ExitCritical(primask);
+        return false;
+    }
+
+    slot = &g_runtime_state.ipms_control_queue[g_runtime_state.ipms_control_head];
+    slot->type = type;
+    slot->value = value;
+    slot->timestamp_ms = timestamp_ms;
+    g_runtime_state.ipms_control_head = next_head;
+    RuntimeState_ExitCritical(primask);
+
+    return true;
+}
+
+bool RuntimeState_PopIpmsControlRequest(RuntimeIpmsControlRequest_t *request)
+{
+    uint32_t primask;
+    bool has_request = false;
+
+    if (request == NULL)
+    {
+        return false;
+    }
+
+    primask = RuntimeState_EnterCritical();
+    if (g_runtime_state.ipms_control_head != g_runtime_state.ipms_control_tail)
+    {
+        *request = g_runtime_state.ipms_control_queue[g_runtime_state.ipms_control_tail];
+        g_runtime_state.ipms_control_tail =
+                (uint8_t)((g_runtime_state.ipms_control_tail + 1U) % RUNTIME_IPMS_CONTROL_QUEUE_SIZE);
+        has_request = true;
+    }
+    RuntimeState_ExitCritical(primask);
+
+    return has_request;
 }

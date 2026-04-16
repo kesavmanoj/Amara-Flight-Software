@@ -162,6 +162,7 @@ int main(void)
   ADC_Monitor_Status_t adc_init_status = ADC_Monitor_Init(&hadc1);
   ADC_Monitor_Status_t adc_start_status = ADC_Monitor_Start();
   Telemetry_Init(&hcrc);
+  Telemetry_SetDownlinkMode(TELEM_DOWNLINK_RADIO_WITH_UART_MIRROR);
   Telemetry_Status_t boot_telem_status = Telemetry_SendSystemStatusEx(0x01U);
   Telemetry_Status_t boot_event_status = Telemetry_SendEventEx(TELEM_EVENT_BOOT, HAL_GetTick());
   IPMS_GetDefaultConfig(ipms_config);
@@ -218,6 +219,7 @@ int main(void)
               ipms_config->stop_enter_v,
               IPMS_PolicyModeToString(IPMS_POLICY_MONITOR_ONLY),
               IPMS_SimulationModeToString(IPMS_SIMULATION_AUTO));
+  Logger_Info("Telemetry downlink mode: %s", Telemetry_DownlinkModeToString(Telemetry_GetDownlinkMode()));
 
 
   /* USER CODE END 2 */

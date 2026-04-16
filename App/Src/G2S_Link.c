@@ -329,6 +329,34 @@ G2S_Status_t G2S_Link_SendEvent(G2S_Link_Handle_t *link, const uint8_t *payload,
     return status;
 }
 
+G2S_Status_t G2S_Link_SendTelemetry(G2S_Link_Handle_t *link, const uint8_t *payload, uint16_t payload_length)
+{
+    G2S_Packet_t packet;
+    G2S_Status_t status = G2S_Validate(link);
+
+    if (status != G2S_STATUS_OK)
+    {
+        return status;
+    }
+
+    status = G2S_BuildPacket(link,
+                             &packet,
+                             G2S_PACKET_TYPE_TELEMETRY,
+                             G2S_GROUND_NODE_ID,
+                             payload,
+                             payload_length,
+                             0U);
+    if (status != G2S_STATUS_OK)
+    {
+        link->stats.last_status = status;
+        return status;
+    }
+
+    status = G2S_SendPacket(link, &packet);
+    link->stats.last_status = status;
+    return status;
+}
+
 void G2S_Link_GetStats(G2S_Link_Handle_t *link, G2S_Stats_t *stats)
 {
     if ((link == NULL) || (stats == NULL))

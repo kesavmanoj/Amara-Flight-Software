@@ -224,9 +224,17 @@ void RTOS_NotifyCommTaskRxFromISR(void)
 static void RTOS_RunCommTaskCycle(void)
 {
     G2S_Link_Handle_t *g2s_link = RuntimeResources_GetG2SLink();
+    Telemetry_Status_t telemetry_status;
 
     CommandParser_Process();
     (void)G2S_Link_Process(g2s_link);
+    telemetry_status = Telemetry_ProcessStep(g2s_link);
+    if ((telemetry_status != TELEM_STATUS_OK) &&
+        (telemetry_status != TELEM_STATUS_IDLE) &&
+        (telemetry_status != TELEM_STATUS_TX_BUSY))
+    {
+        Logger_Warn("Telemetry transport step: %s", Telemetry_StatusToString(telemetry_status));
+    }
 }
 
 static void RTOS_RunTelemetryRadioTaskCycle(void)
@@ -236,8 +244,6 @@ static void RTOS_RunTelemetryRadioTaskCycle(void)
     static uint32_t last_radio_report_ms = 0U;
     static uint8_t telemetry_status_counter = 0U;
     uint32_t now = HAL_GetTick();
-
-    Telemetry_Process();
 
     if ((now - last_telem_queue_ms) >= 2000U)
     {
@@ -267,7 +273,7 @@ static void RTOS_RunTelemetryRadioTaskCycle(void)
                     (unsigned long)telemetry_counters.error_count);
         Logger_Info("Telemetry heartbeat queue: result=%s",
                     Telemetry_StatusToString(heartbeat_status));
-        Logger_Info("Telemetry stats: depth=%u/%u peak=%u queued=%lu sent=%lu dropped=%lu tx_busy=%lu tx_err=%lu rtc_fallback=%lu pending=%u last_enq=%s last_proc=%s ts_src=%s",
+        Logger_Info("Telemetry stats: depth=%u/%u peak=%u queued=%lu sent=%lu dropped=%lu tx_busy=%lu tx_err=%lu rtc_fallback=%lu pending=%u last_enq=%s last_proc=%s ts_src=%s mode=%s radio_sent=%lu uart_sent=%lu",
                     (unsigned int)telem_stats.queue_depth,
                     (unsigned int)telem_stats.queue_capacity,
                     (unsigned int)telem_stats.max_queue_depth,
@@ -280,7 +286,10 @@ static void RTOS_RunTelemetryRadioTaskCycle(void)
                     (unsigned int)telem_stats.frame_pending,
                     Telemetry_StatusToString(telem_stats.last_enqueue_status),
                     Telemetry_StatusToString(telem_stats.last_process_status),
-                    SystemRuntime_TelemetryTimestampSourceToString(telem_stats.last_timestamp_source));
+                    SystemRuntime_TelemetryTimestampSourceToString(telem_stats.last_timestamp_source),
+                    Telemetry_DownlinkModeToString(telem_stats.downlink_mode),
+                    (unsigned long)telem_stats.radio_sent_frames,
+                    (unsigned long)telem_stats.uart_sent_frames);
         Logger_Info("Logger stats: attempted=%lu dropped=%lu persist_dropped=%lu last_uart=%s last_storage=%s",
                     (unsigned long)logger_stats.messages_attempted,
                     (unsigned long)logger_stats.messages_dropped,
@@ -327,6 +336,7 @@ static void RTOS_RunHealthPowerTaskCycle(void)
     uint32_t now = HAL_GetTick();
     uint32_t fault_mask = 0U;
     IPMS_ActionRequest_t power_action;
+    RuntimeIpmsControlRequest_t ipms_control_request;
 
     RTOS_MarkTaskAlive(RTOS_TASK_ID_HEALTH);
 
@@ -346,6 +356,28 @@ static void RTOS_RunHealthPowerTaskCycle(void)
     }
 
     SystemRuntime_ReportIpmsEvents();
+
+    while (RuntimeState_PopIpmsControlRequest(&ipms_control_request))
+    {
+        if (ipms_control_request.type == RUNTIME_IPMS_CONTROL_SET_SIMULATION_MODE)
+        {
+            IPMS_Status_t status = IPMS_SetSimulationMode(
+                    (IPMS_SimulationMode_t)ipms_control_request.value,
+                    ipms_control_request.timestamp_ms);
+            Logger_Info("IPMS simulation request apply: mode=%s result=%s",
+                        IPMS_SimulationModeToString((IPMS_SimulationMode_t)ipms_control_request.value),
+                        IPMS_StatusToString(status));
+        }
+        else if (ipms_control_request.type == RUNTIME_IPMS_CONTROL_SET_POLICY_MODE)
+        {
+            IPMS_Status_t status = IPMS_SetPolicyMode(
+                    (IPMS_PolicyMode_t)ipms_control_request.value,
+                    ipms_control_request.timestamp_ms);
+            Logger_Info("IPMS policy request apply: mode=%s result=%s",
+                        IPMS_PolicyModeToString((IPMS_PolicyMode_t)ipms_control_request.value),
+                        IPMS_StatusToString(status));
+        }
+    }
 
     if ((now - last_heartbeat_ms) >= 500U)
     {

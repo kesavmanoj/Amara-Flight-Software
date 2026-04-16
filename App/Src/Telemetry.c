@@ -1,8 +1,6 @@
-/*
- * Telemetry.c
- *
- *  Created on: 11-Mar-2026
- *      Author: KESAV
+/**
+ * @file Telemetry.c
+ * @brief Telemetry module implementation (frame builder + queue + transport processing).
  */
 
 #include "Telemetry.h"
@@ -13,9 +11,11 @@
 
 
 _Static_assert(((sizeof(TelemetryFrame_t) - sizeof(uint32_t)) % 4U) == 0U,
-		"Telemetry frame CRC region must stay 32-bit aligned");
+			"Telemetry frame CRC region must stay 32-bit aligned");
+_Static_assert(sizeof(TelemetryFrame_t) <= G2S_MAX_PAYLOAD_SIZE,
+			"Telemetry frame must fit into a single G2S payload");
 _Static_assert(sizeof(TelemetrySystemStatusPayload_t) <= TELEM_PAYLOAD_SIZE,
-		"System status payload exceeds telemetry payload size");
+			"System status payload exceeds telemetry payload size");
 _Static_assert(sizeof(TelemetryADCHealthPayload_t) <= TELEM_PAYLOAD_SIZE,
 		"ADC health payload exceeds telemetry payload size");
 _Static_assert(sizeof(TelemetryEventPayload_t) <= TELEM_PAYLOAD_SIZE,
@@ -31,8 +31,11 @@ static TelemetryFrame_t frame_buffer[TELEM_QUEUE_SIZE];
 static TelemetryFrame_t tx_frame;
 static FrameQueue_t telem_queue;
 
+/* Process-state flags for the single-frame transport state machine. */
 static bool frame_pending = false;
 static bool process_active = false;
+
+/* Diagnostic counters exposed through Telemetry_GetStats(). */
 static volatile uint32_t g_telem_queued_frames = 0U;
 static volatile uint32_t g_telem_sent_frames = 0U;
 static volatile uint32_t g_telem_dropped_frames = 0U;
@@ -43,7 +46,11 @@ static volatile uint16_t g_telem_max_queue_depth = 0U;
 static volatile Telemetry_Status_t g_telem_last_enqueue_status = TELEM_STATUS_NOT_INITIALIZED;
 static volatile Telemetry_Status_t g_telem_last_process_status = TELEM_STATUS_NOT_INITIALIZED;
 static volatile TelemetryTimestampSource_t g_telem_last_timestamp_source = TELEM_TIMESTAMP_SOURCE_UPTIME_FALLBACK;
+static volatile TelemetryDownlinkMode_t g_telem_downlink_mode = TELEM_DOWNLINK_RADIO_WITH_UART_MIRROR;
+static volatile uint32_t g_telem_radio_sent_frames = 0U;
+static volatile uint32_t g_telem_uart_sent_frames = 0U;
 
+/** @brief Enter module critical section by masking interrupts. */
 static uint32_t Telemetry_EnterCritical(void)
 {
 	uint32_t primask = __get_PRIMASK();
@@ -51,6 +58,7 @@ static uint32_t Telemetry_EnterCritical(void)
 	return primask;
 }
 
+/** @brief Exit module critical section and restore prior interrupt mask state. */
 static void Telemetry_ExitCritical(uint32_t primask)
 {
 	if(primask == 0U){
@@ -58,6 +66,7 @@ static void Telemetry_ExitCritical(uint32_t primask)
 	}
 }
 
+/** @brief Store last enqueue status atomically and return it. */
 static Telemetry_Status_t Telemetry_SetEnqueueStatus(Telemetry_Status_t status)
 {
 	uint32_t primask = Telemetry_EnterCritical();
@@ -66,6 +75,7 @@ static Telemetry_Status_t Telemetry_SetEnqueueStatus(Telemetry_Status_t status)
 	return status;
 }
 
+/** @brief Store last process status atomically and return it. */
 static Telemetry_Status_t Telemetry_SetProcessStatus(Telemetry_Status_t status)
 {
 	uint32_t primask = Telemetry_EnterCritical();
@@ -74,11 +84,29 @@ static Telemetry_Status_t Telemetry_SetProcessStatus(Telemetry_Status_t status)
 	return status;
 }
 
+/** @brief Check whether current downlink mode includes radio transport. */
+static bool Telemetry_DownlinkUsesRadio(TelemetryDownlinkMode_t mode)
+{
+	return (mode == TELEM_DOWNLINK_RADIO_ONLY) || (mode == TELEM_DOWNLINK_RADIO_WITH_UART_MIRROR);
+}
+
+/** @brief Check whether current downlink mode includes UART transport. */
+static bool Telemetry_DownlinkUsesUart(TelemetryDownlinkMode_t mode)
+{
+	return (mode == TELEM_DOWNLINK_UART_ONLY) || (mode == TELEM_DOWNLINK_RADIO_WITH_UART_MIRROR);
+}
+
+/** @brief Return true when @p year is a leap year in Gregorian calendar. */
 static bool Telemetry_IsLeapYear(uint32_t year)
 {
 	return ((year % 4U) == 0U) && ((((year % 100U) != 0U)) || ((year % 400U) == 0U));
 }
 
+/**
+ * @brief Generate frame timestamp in seconds from configured telemetry epoch.
+ * @param source Optional output indicating whether RTC or uptime fallback was used.
+ * @return Timestamp in seconds.
+ */
 static uint32_t Telemetry_GetRtcTimestampSeconds(TelemetryTimestampSource_t *source)
 {
 	static const uint8_t days_in_month[] = {31U, 28U, 31U, 30U, 31U, 30U, 31U, 31U, 30U, 31U, 30U, 31U};
@@ -137,6 +165,7 @@ static uint32_t Telemetry_GetRtcTimestampSeconds(TelemetryTimestampSource_t *sou
 		   (uint32_t)sTime.Seconds;
 }
 
+/** @brief Validate packet identifier for telemetry frame creation. */
 static bool Telemetry_IsValidPacketId(TelemetryPacketID_t id)
 {
 	switch(id){
@@ -151,6 +180,7 @@ static bool Telemetry_IsValidPacketId(TelemetryPacketID_t id)
 	}
 }
 
+/** @brief Update queue depth high-water mark; caller must already hold critical section. */
 static void Telemetry_UpdateQueueDepthPeakLocked(void)
 {
 	uint16_t depth = FrameQueue_Count(&telem_queue);
@@ -160,13 +190,21 @@ static void Telemetry_UpdateQueueDepthPeakLocked(void)
 	}
 }
 
-static void Telemetry_BuildFrame(TelemetryFrame_t *frame, CRC_HandleTypeDef *crc, TelemetryPacketID_t id, uint8_t *payload, uint16_t len){
+/**
+ * @brief Build a telemetry frame from payload data and compute CRC.
+ *
+ * Notes:
+ * - Unused payload bytes are zero-filled for deterministic CRC.
+ * - Timestamp source is tracked for diagnostics (RTC vs fallback).
+ */
+static void Telemetry_BuildFrame(TelemetryFrame_t *frame, CRC_HandleTypeDef *crc, TelemetryPacketID_t id, const uint8_t *payload, uint16_t len){
 	TelemetryTimestampSource_t timestamp_source = TELEM_TIMESTAMP_SOURCE_UPTIME_FALLBACK;
 	uint32_t primask;
 
 	frame -> sync_word = TELEM_SYNC_WORD;
 	frame -> timestamp = Telemetry_GetRtcTimestampSeconds(&timestamp_source);
 	frame -> packet_id = (uint8_t)id;
+	frame -> payload_length = (uint8_t)len;
 
 	memset(frame -> payload, 0, TELEM_PAYLOAD_SIZE);
 
@@ -187,6 +225,7 @@ static void Telemetry_BuildFrame(TelemetryFrame_t *frame, CRC_HandleTypeDef *crc
 
 }
 
+/** @copydoc Telemetry_Init */
 void Telemetry_Init(CRC_HandleTypeDef *hcrc){
 	uint32_t primask = Telemetry_EnterCritical();
 
@@ -196,6 +235,7 @@ void Telemetry_Init(CRC_HandleTypeDef *hcrc){
 		process_active = false;
 		g_telem_last_enqueue_status = TELEM_STATUS_NOT_INITIALIZED;
 		g_telem_last_process_status = TELEM_STATUS_NOT_INITIALIZED;
+		g_telem_downlink_mode = TELEM_DOWNLINK_RADIO_WITH_UART_MIRROR;
 		Telemetry_ExitCritical(primask);
 		return;
 	}
@@ -216,12 +256,16 @@ void Telemetry_Init(CRC_HandleTypeDef *hcrc){
 	g_telem_last_enqueue_status = TELEM_STATUS_OK;
 	g_telem_last_process_status = TELEM_STATUS_IDLE;
 	g_telem_last_timestamp_source = TELEM_TIMESTAMP_SOURCE_UPTIME_FALLBACK;
+	g_telem_downlink_mode = TELEM_DOWNLINK_RADIO_WITH_UART_MIRROR;
+	g_telem_radio_sent_frames = 0U;
+	g_telem_uart_sent_frames = 0U;
 	Telemetry_ExitCritical(primask);
 
 }
 
 
-Telemetry_Status_t Telemetry_QueuePacketEx(TelemetryPacketID_t id, uint8_t* payload, uint16_t len){
+/** @copydoc Telemetry_QueuePacketEx */
+Telemetry_Status_t Telemetry_QueuePacketEx(TelemetryPacketID_t id, const uint8_t *payload, uint16_t len){
 	CRC_HandleTypeDef *crc_handle;
 	uint32_t primask;
 
@@ -262,14 +306,31 @@ Telemetry_Status_t Telemetry_QueuePacketEx(TelemetryPacketID_t id, uint8_t* payl
 
 }
 
-bool Telemetry_QueuePacket(TelemetryPacketID_t id, uint8_t *payload, uint16_t len)
+/** @copydoc Telemetry_QueuePacket */
+bool Telemetry_QueuePacket(TelemetryPacketID_t id, const uint8_t *payload, uint16_t len)
 {
 	return (Telemetry_QueuePacketEx(id, payload, len) == TELEM_STATUS_OK);
 }
 
-Telemetry_Status_t Telemetry_ProcessStep(void){
-	UART_Driver_Status_t uart_status;
+/**
+ * @copydoc Telemetry_ProcessStep
+ *
+ * Internal state machine:
+ * 1. Claim processing ownership with process_active.
+ * 2. Load one frame from queue into tx_frame if no frame is pending.
+ * 3. Attempt configured transport path(s) using a local snapshot.
+ * 4. Clear pending only when delivery policy is satisfied.
+ */
+Telemetry_Status_t Telemetry_ProcessStep(G2S_Link_Handle_t *g2s_link){
+	UART_Driver_Status_t uart_status = UART_DRIVER_OK;
+	G2S_Status_t g2s_status = G2S_STATUS_OK;
 	CRC_HandleTypeDef *crc_handle;
+	TelemetryDownlinkMode_t downlink_mode;
+	TelemetryFrame_t frame_snapshot;
+	bool send_radio;
+	bool send_uart;
+	bool radio_ok = true;
+	bool uart_ok = true;
 	uint32_t primask;
 
 	primask = Telemetry_EnterCritical();
@@ -299,12 +360,44 @@ Telemetry_Status_t Telemetry_ProcessStep(void){
 
 		frame_pending = true;
 	}
+
+	frame_snapshot = tx_frame;
+	downlink_mode = g_telem_downlink_mode;
 	Telemetry_ExitCritical(primask);
 
-	uart_status = UART_WriteChannel(UART_DRIVER_CHANNEL_TELEMETRY, (uint8_t *)&tx_frame, sizeof(tx_frame));
+	send_radio = Telemetry_DownlinkUsesRadio(downlink_mode);
+	send_uart = Telemetry_DownlinkUsesUart(downlink_mode);
+
+	if(send_radio){
+		if(g2s_link == NULL){
+			g2s_status = G2S_STATUS_NOT_INITIALIZED;
+			radio_ok = false;
+		} else {
+			g2s_status = G2S_Link_SendTelemetry(g2s_link, (const uint8_t *)&frame_snapshot, (uint16_t)sizeof(frame_snapshot));
+			radio_ok = (g2s_status == G2S_STATUS_OK);
+		}
+	}
+
+	if(send_uart){
+		uart_status = UART_WriteChannel(UART_DRIVER_CHANNEL_TELEMETRY, (uint8_t *)&frame_snapshot, (uint16_t)sizeof(frame_snapshot));
+		uart_ok = (uart_status == UART_DRIVER_OK);
+	}
+
 	primask = Telemetry_EnterCritical();
 	process_active = false;
-	if(uart_status == UART_DRIVER_OK){
+
+	if(send_radio && radio_ok){
+		g_telem_radio_sent_frames++;
+	}
+	if(send_uart && uart_ok){
+		g_telem_uart_sent_frames++;
+	}
+
+	if((downlink_mode == TELEM_DOWNLINK_RADIO_WITH_UART_MIRROR) &&
+	   ((radio_ok && send_radio) || (uart_ok && send_uart))){
+		if((send_radio && !radio_ok) || (send_uart && !uart_ok)){
+			g_telem_transport_errors++;
+		}
 		frame_pending = false;
 		g_telem_sent_frames++;
 		g_telem_last_process_status = TELEM_STATUS_OK;
@@ -312,7 +405,16 @@ Telemetry_Status_t Telemetry_ProcessStep(void){
 		return TELEM_STATUS_OK;
 	}
 
-	if((uart_status == UART_DRIVER_BUSY) || (uart_status == UART_DRIVER_BUFFER_FULL)){
+	if((!send_radio || radio_ok) && (!send_uart || uart_ok)){
+		frame_pending = false;
+		g_telem_sent_frames++;
+		g_telem_last_process_status = TELEM_STATUS_OK;
+		Telemetry_ExitCritical(primask);
+		return TELEM_STATUS_OK;
+	}
+
+	if((send_uart && ((uart_status == UART_DRIVER_BUSY) || (uart_status == UART_DRIVER_BUFFER_FULL))) ||
+	   (send_radio && (g2s_status == G2S_STATUS_NOT_INITIALIZED))){
 		g_telem_tx_busy_retries++;
 		g_telem_last_process_status = TELEM_STATUS_TX_BUSY;
 		Telemetry_ExitCritical(primask);
@@ -325,10 +427,38 @@ Telemetry_Status_t Telemetry_ProcessStep(void){
 	return TELEM_STATUS_TRANSPORT_ERROR;
 }
 
-void Telemetry_Process(void){
-	(void)Telemetry_ProcessStep();
+/** @copydoc Telemetry_Process */
+void Telemetry_Process(G2S_Link_Handle_t *g2s_link){
+	(void)Telemetry_ProcessStep(g2s_link);
 }
 
+/** @copydoc Telemetry_SetDownlinkMode */
+void Telemetry_SetDownlinkMode(TelemetryDownlinkMode_t mode)
+{
+	uint32_t primask;
+
+	if((mode != TELEM_DOWNLINK_RADIO_ONLY) &&
+	   (mode != TELEM_DOWNLINK_UART_ONLY) &&
+	   (mode != TELEM_DOWNLINK_RADIO_WITH_UART_MIRROR)){
+		return;
+	}
+
+	primask = Telemetry_EnterCritical();
+	g_telem_downlink_mode = mode;
+	Telemetry_ExitCritical(primask);
+}
+
+/** @copydoc Telemetry_GetDownlinkMode */
+TelemetryDownlinkMode_t Telemetry_GetDownlinkMode(void)
+{
+	TelemetryDownlinkMode_t mode;
+	uint32_t primask = Telemetry_EnterCritical();
+	mode = g_telem_downlink_mode;
+	Telemetry_ExitCritical(primask);
+	return mode;
+}
+
+/** @copydoc Telemetry_SendSystemStatusEx */
 Telemetry_Status_t Telemetry_SendSystemStatusEx(uint8_t status)
 {
     TelemetrySystemStatusPayload_t payload;
@@ -347,11 +477,13 @@ Telemetry_Status_t Telemetry_SendSystemStatusEx(uint8_t status)
     );
 }
 
+/** @copydoc Telemetry_SendSystemStatus */
 bool Telemetry_SendSystemStatus(uint8_t status)
 {
 	return (Telemetry_SendSystemStatusEx(status) == TELEM_STATUS_OK);
 }
 
+/** @copydoc Telemetry_SendADCHealthEx */
 Telemetry_Status_t Telemetry_SendADCHealthEx(float vdda_voltage, float battery_voltage, float mcu_temp_c)
 {
     TelemetryADCHealthPayload_t payload;
@@ -371,11 +503,13 @@ Telemetry_Status_t Telemetry_SendADCHealthEx(float vdda_voltage, float battery_v
     );
 }
 
+/** @copydoc Telemetry_SendADCHealth */
 bool Telemetry_SendADCHealth(float vdda_voltage, float battery_voltage, float mcu_temp_c)
 {
 	return (Telemetry_SendADCHealthEx(vdda_voltage, battery_voltage, mcu_temp_c) == TELEM_STATUS_OK);
 }
 
+/** @copydoc Telemetry_SendEventEx */
 Telemetry_Status_t Telemetry_SendEventEx(TelemetryEventCode_t event_code, uint32_t event_value)
 {
     TelemetryEventPayload_t payload;
@@ -394,11 +528,13 @@ Telemetry_Status_t Telemetry_SendEventEx(TelemetryEventCode_t event_code, uint32
     );
 }
 
+/** @copydoc Telemetry_SendEvent */
 bool Telemetry_SendEvent(TelemetryEventCode_t event_code, uint32_t event_value)
 {
 	return (Telemetry_SendEventEx(event_code, event_value) == TELEM_STATUS_OK);
 }
 
+/** @copydoc Telemetry_SendHeartbeatEx */
 Telemetry_Status_t Telemetry_SendHeartbeatEx(void)
 {
     TelemetryHeartbeatPayload_t payload;
@@ -422,11 +558,13 @@ Telemetry_Status_t Telemetry_SendHeartbeatEx(void)
     );
 }
 
+/** @copydoc Telemetry_SendHeartbeat */
 bool Telemetry_SendHeartbeat(void)
 {
 	return (Telemetry_SendHeartbeatEx() == TELEM_STATUS_OK);
 }
 
+/** @copydoc Telemetry_SendCommandAckEx */
 Telemetry_Status_t Telemetry_SendCommandAckEx(uint8_t command_id, int8_t status_code, uint32_t argument)
 {
     TelemetryCommandAckPayload_t payload;
@@ -447,11 +585,13 @@ Telemetry_Status_t Telemetry_SendCommandAckEx(uint8_t command_id, int8_t status_
     );
 }
 
+/** @copydoc Telemetry_SendCommandAck */
 bool Telemetry_SendCommandAck(uint8_t command_id, int8_t status_code, uint32_t argument)
 {
 	return (Telemetry_SendCommandAckEx(command_id, status_code, argument) == TELEM_STATUS_OK);
 }
 
+/** @copydoc Telemetry_GetStats */
 void Telemetry_GetStats(TelemetryStats_t *stats)
 {
     uint32_t primask;
@@ -471,13 +611,17 @@ void Telemetry_GetStats(TelemetryStats_t *stats)
     stats->tx_busy_retries = g_telem_tx_busy_retries;
     stats->transport_errors = g_telem_transport_errors;
     stats->rtc_fallback_count = g_telem_rtc_fallback_count;
-    stats->frame_pending = frame_pending ? 1U : 0U;
-    stats->last_enqueue_status = g_telem_last_enqueue_status;
-    stats->last_process_status = g_telem_last_process_status;
-    stats->last_timestamp_source = g_telem_last_timestamp_source;
-    Telemetry_ExitCritical(primask);
+	stats->frame_pending = frame_pending ? 1U : 0U;
+	stats->last_enqueue_status = g_telem_last_enqueue_status;
+	stats->last_process_status = g_telem_last_process_status;
+	stats->last_timestamp_source = g_telem_last_timestamp_source;
+	stats->downlink_mode = g_telem_downlink_mode;
+	stats->radio_sent_frames = g_telem_radio_sent_frames;
+	stats->uart_sent_frames = g_telem_uart_sent_frames;
+	Telemetry_ExitCritical(primask);
 }
 
+/** @copydoc Telemetry_StatusToString */
 const char *Telemetry_StatusToString(Telemetry_Status_t status)
 {
 	switch(status){
@@ -498,5 +642,19 @@ const char *Telemetry_StatusToString(Telemetry_Status_t status)
 	case TELEM_STATUS_TRANSPORT_ERROR:
 	default:
 		return "TRANSPORT_ERROR";
+	}
+}
+
+/** @copydoc Telemetry_DownlinkModeToString */
+const char *Telemetry_DownlinkModeToString(TelemetryDownlinkMode_t mode)
+{
+	switch(mode){
+	case TELEM_DOWNLINK_RADIO_ONLY:
+		return "RADIO_ONLY";
+	case TELEM_DOWNLINK_UART_ONLY:
+		return "UART_ONLY";
+	case TELEM_DOWNLINK_RADIO_WITH_UART_MIRROR:
+	default:
+		return "RADIO_WITH_UART_MIRROR";
 	}
 }

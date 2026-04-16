@@ -40,6 +40,22 @@ static volatile uint8_t g_event_tail = 0U;
 static volatile bool g_rtc_wakeup_seen = false;
 static volatile bool g_button_wakeup_seen = false;
 
+static uint32_t IPMS_EnterCritical(void)
+{
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    return primask;
+}
+
+static void IPMS_ExitCritical(uint32_t primask)
+{
+    if (primask == 0U)
+    {
+        __enable_irq();
+    }
+}
+
+/* Must be called with IPMS critical section held. */
 static void IPMS_ResetContext(void)
 {
     memset(&g_ipms, 0, sizeof(g_ipms));
@@ -51,6 +67,7 @@ static void IPMS_ResetContext(void)
     g_ipms.candidate_state = IPMS_POWER_STATE_NORMAL;
 }
 
+/* Must be called with IPMS critical section held. */
 static void IPMS_PushEvent(const IPMS_Event_t *event)
 {
     uint8_t next_head;
@@ -70,6 +87,7 @@ static void IPMS_PushEvent(const IPMS_Event_t *event)
     g_event_head = next_head;
 }
 
+/* Must be called with IPMS critical section held. */
 static void IPMS_PostStateTransitionEvent(IPMS_PowerState_t old_state,
                                           IPMS_PowerState_t new_state,
                                           IPMS_Reason_t reason,
@@ -90,6 +108,7 @@ static void IPMS_PostStateTransitionEvent(IPMS_PowerState_t old_state,
     IPMS_PushEvent(&event);
 }
 
+/* Must be called with IPMS critical section held. */
 static void IPMS_PostModeEvent(IPMS_EventType_t type, IPMS_Reason_t reason, uint32_t now_ms)
 {
     IPMS_Event_t event;
@@ -107,6 +126,7 @@ static void IPMS_PostModeEvent(IPMS_EventType_t type, IPMS_Reason_t reason, uint
     IPMS_PushEvent(&event);
 }
 
+/* Must be called with IPMS critical section held. */
 static float IPMS_ResolveEffectiveBattery(float measured_voltage)
 {
     switch (g_ipms.simulation_mode)
@@ -121,6 +141,7 @@ static float IPMS_ResolveEffectiveBattery(float measured_voltage)
     }
 }
 
+/* Must be called with IPMS critical section held. */
 static IPMS_PowerState_t IPMS_GetDesiredState(float battery_voltage)
 {
     switch (g_ipms.power_state)
@@ -195,6 +216,7 @@ static IPMS_PowerState_t IPMS_GetDesiredState(float battery_voltage)
     }
 }
 
+/* Must be called with IPMS critical section held. */
 static uint8_t IPMS_GetRequiredSamples(IPMS_PowerState_t state)
 {
     switch (state)
@@ -212,6 +234,7 @@ static uint8_t IPMS_GetRequiredSamples(IPMS_PowerState_t state)
     }
 }
 
+/* Must be called with IPMS critical section held. */
 static void IPMS_ApplyState(IPMS_PowerState_t new_state, IPMS_Reason_t reason, uint32_t now_ms)
 {
     IPMS_PowerState_t old_state = g_ipms.power_state;
@@ -276,11 +299,14 @@ void IPMS_GetDefaultConfig(IPMS_Config_t *config)
 
 IPMS_Status_t IPMS_Init(const IPMS_Config_t *config)
 {
+    uint32_t primask;
+
     if (config == NULL)
     {
         return IPMS_STATUS_INVALID_PARAM;
     }
 
+    primask = IPMS_EnterCritical();
     IPMS_ResetContext();
     g_ipms.config = *config;
     g_ipms.initialized = true;
@@ -288,6 +314,7 @@ IPMS_Status_t IPMS_Init(const IPMS_Config_t *config)
     g_event_tail = 0U;
     g_rtc_wakeup_seen = false;
     g_button_wakeup_seen = false;
+    IPMS_ExitCritical(primask);
 
     HAL_NVIC_SetPriority(RTC_WKUP_IRQn, 6U, 0U);
     HAL_NVIC_EnableIRQ(RTC_WKUP_IRQn);
@@ -299,9 +326,12 @@ IPMS_Status_t IPMS_ProcessBatterySample(float measured_battery_voltage, uint32_t
 {
     IPMS_PowerState_t desired_state;
     uint8_t required_samples;
+    uint32_t primask;
 
+    primask = IPMS_EnterCritical();
     if (g_ipms.initialized == false)
     {
+        IPMS_ExitCritical(primask);
         return IPMS_STATUS_NOT_INITIALIZED;
     }
 
@@ -314,6 +344,7 @@ IPMS_Status_t IPMS_ProcessBatterySample(float measured_battery_voltage, uint32_t
     {
         g_ipms.candidate_state = desired_state;
         g_ipms.candidate_count = 0U;
+        IPMS_ExitCritical(primask);
         return IPMS_STATUS_OK;
     }
 
@@ -321,6 +352,7 @@ IPMS_Status_t IPMS_ProcessBatterySample(float measured_battery_voltage, uint32_t
     {
         g_ipms.candidate_state = desired_state;
         g_ipms.candidate_count = 1U;
+        IPMS_ExitCritical(primask);
         return IPMS_STATUS_OK;
     }
 
@@ -333,18 +365,23 @@ IPMS_Status_t IPMS_ProcessBatterySample(float measured_battery_voltage, uint32_t
                         now_ms);
     }
 
+    IPMS_ExitCritical(primask);
     return IPMS_STATUS_OK;
 }
 
 IPMS_Status_t IPMS_SetSimulationMode(IPMS_SimulationMode_t mode, uint32_t now_ms)
 {
+    uint32_t primask = IPMS_EnterCritical();
+
     if (g_ipms.initialized == false)
     {
+        IPMS_ExitCritical(primask);
         return IPMS_STATUS_NOT_INITIALIZED;
     }
 
     if (mode > IPMS_SIMULATION_ECLIPSE)
     {
+        IPMS_ExitCritical(primask);
         return IPMS_STATUS_INVALID_PARAM;
     }
 
@@ -352,18 +389,23 @@ IPMS_Status_t IPMS_SetSimulationMode(IPMS_SimulationMode_t mode, uint32_t now_ms
     g_ipms.candidate_count = 0U;
     g_ipms.candidate_state = g_ipms.power_state;
     IPMS_PostModeEvent(IPMS_EVENT_SIMULATION_MODE_CHANGE, IPMS_REASON_SIMULATION, now_ms);
+    IPMS_ExitCritical(primask);
     return IPMS_STATUS_OK;
 }
 
 IPMS_Status_t IPMS_SetPolicyMode(IPMS_PolicyMode_t mode, uint32_t now_ms)
 {
+    uint32_t primask = IPMS_EnterCritical();
+
     if (g_ipms.initialized == false)
     {
+        IPMS_ExitCritical(primask);
         return IPMS_STATUS_NOT_INITIALIZED;
     }
 
     if (mode > IPMS_POLICY_ENABLE_SLEEP_AND_STOP)
     {
+        IPMS_ExitCritical(primask);
         return IPMS_STATUS_INVALID_PARAM;
     }
 
@@ -374,16 +416,20 @@ IPMS_Status_t IPMS_SetPolicyMode(IPMS_PolicyMode_t mode, uint32_t now_ms)
         g_ipms.action_armed_for_state = false;
     }
     IPMS_PostModeEvent(IPMS_EVENT_POLICY_MODE_CHANGE, IPMS_REASON_POLICY, now_ms);
+    IPMS_ExitCritical(primask);
     return IPMS_STATUS_OK;
 }
 
 void IPMS_GetStatus(IPMS_StatusSnapshot_t *snapshot)
 {
+    uint32_t primask;
+
     if ((g_ipms.initialized == false) || (snapshot == NULL))
     {
         return;
     }
 
+    primask = IPMS_EnterCritical();
     snapshot->power_state = g_ipms.power_state;
     snapshot->simulation_mode = g_ipms.simulation_mode;
     snapshot->policy_mode = g_ipms.policy_mode;
@@ -397,24 +443,38 @@ void IPMS_GetStatus(IPMS_StatusSnapshot_t *snapshot)
     snapshot->stop_entries = g_ipms.stop_entries;
     snapshot->rtc_wakeups = g_ipms.rtc_wakeups;
     snapshot->button_wakeups = g_ipms.button_wakeups;
+    IPMS_ExitCritical(primask);
 }
 
 bool IPMS_PopEvent(IPMS_Event_t *event)
 {
+    uint32_t primask;
+
     if ((event == NULL) || (g_event_head == g_event_tail))
     {
         return false;
     }
 
+    primask = IPMS_EnterCritical();
+    if (g_event_head == g_event_tail)
+    {
+        IPMS_ExitCritical(primask);
+        return false;
+    }
+
     *event = g_event_queue[g_event_tail];
     g_event_tail = (uint8_t)((g_event_tail + 1U) % IPMS_EVENT_QUEUE_SIZE);
+    IPMS_ExitCritical(primask);
     return true;
 }
 
 bool IPMS_GetPendingAction(IPMS_ActionRequest_t *request)
 {
+    uint32_t primask = IPMS_EnterCritical();
+
     if ((g_ipms.initialized == false) || (request == NULL) || (g_ipms.pending_action == IPMS_ACTION_NONE))
     {
+        IPMS_ExitCritical(primask);
         return false;
     }
 
@@ -429,17 +489,22 @@ bool IPMS_GetPendingAction(IPMS_ActionRequest_t *request)
     }
 
     g_ipms.pending_action = IPMS_ACTION_NONE;
+    IPMS_ExitCritical(primask);
     return true;
 }
 
 IPMS_Status_t IPMS_ArmRtcWakeup(RTC_HandleTypeDef *hrtc_handle, uint32_t duration_ms)
 {
     uint32_t ticks;
+    uint32_t primask;
 
+    primask = IPMS_EnterCritical();
     if ((g_ipms.initialized == false) || (hrtc_handle == NULL) || (duration_ms == 0U))
     {
+        IPMS_ExitCritical(primask);
         return IPMS_STATUS_INVALID_PARAM;
     }
+    IPMS_ExitCritical(primask);
 
     ticks = (duration_ms * IPMS_RTC_WAKEUP_TICK_HZ) / 1000U;
     if (ticks == 0U)
@@ -452,8 +517,10 @@ IPMS_Status_t IPMS_ArmRtcWakeup(RTC_HandleTypeDef *hrtc_handle, uint32_t duratio
     }
 
     HAL_RTCEx_DeactivateWakeUpTimer(hrtc_handle);
+    primask = IPMS_EnterCritical();
     g_rtc_wakeup_seen = false;
     g_button_wakeup_seen = false;
+    IPMS_ExitCritical(primask);
 
     if (HAL_RTCEx_SetWakeUpTimer_IT(hrtc_handle, ticks, RTC_WAKEUPCLOCK_RTCCLK_DIV16) != HAL_OK)
     {
@@ -486,9 +553,11 @@ void IPMS_OnButtonWakeup(void)
 void IPMS_RecordWakeup(IPMS_WakeSource_t wake_source, uint32_t now_ms)
 {
     IPMS_Event_t event;
+    uint32_t primask = IPMS_EnterCritical();
 
     if (g_ipms.initialized == false)
     {
+        IPMS_ExitCritical(primask);
         return;
     }
 
@@ -533,6 +602,7 @@ void IPMS_RecordWakeup(IPMS_WakeSource_t wake_source, uint32_t now_ms)
     IPMS_ApplyState(IPMS_POWER_STATE_RECOVERY, IPMS_REASON_WAKEUP, now_ms);
     g_rtc_wakeup_seen = false;
     g_button_wakeup_seen = false;
+    IPMS_ExitCritical(primask);
 }
 
 const char *IPMS_StatusToString(IPMS_Status_t status)

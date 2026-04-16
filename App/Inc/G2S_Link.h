@@ -23,7 +23,8 @@
 typedef enum {
     G2S_PACKET_TYPE_COMMAND = 0x01,
     G2S_PACKET_TYPE_ACK     = 0x02,
-    G2S_PACKET_TYPE_EVENT   = 0x03
+    G2S_PACKET_TYPE_EVENT   = 0x03,
+    G2S_PACKET_TYPE_TELEMETRY = 0x04
 } G2S_PacketType_t;
 
 typedef enum {
@@ -84,6 +85,7 @@ typedef struct {
 G2S_Status_t G2S_Link_Init(G2S_Link_Handle_t *link, SX1278_Handle_t *radio, CRC_HandleTypeDef *crc);
 G2S_Status_t G2S_Link_Process(G2S_Link_Handle_t *link);
 G2S_Status_t G2S_Link_SendEvent(G2S_Link_Handle_t *link, const uint8_t *payload, uint16_t payload_length);
+G2S_Status_t G2S_Link_SendTelemetry(G2S_Link_Handle_t *link, const uint8_t *payload, uint16_t payload_length);
 void G2S_Link_GetStats(G2S_Link_Handle_t *link, G2S_Stats_t *stats);
 const char *G2S_StatusToString(G2S_Status_t status);
 
