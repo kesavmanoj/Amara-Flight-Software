@@ -1,8 +1,6 @@
-/*
- * SX1278.c
- *
- *  Created on: 12-Apr-2026
- *      Author: Codex
+/**
+ * @file SX1278.c
+ * @brief SX1278 LoRa radio driver implementation.
  */
 
 #include "SX1278.h"
@@ -158,6 +156,7 @@ static SX1278_Status_t SX1278_ReadRegisterRaw(SX1278_Handle_t *radio, uint8_t re
     return SX1278_STATUS_OK;
 }
 
+/** @copydoc SX1278_Init */
 SX1278_Status_t SX1278_Init(SX1278_Handle_t *radio,
                             SPI_HandleTypeDef *hspi,
                             GPIO_TypeDef *cs_port,
@@ -528,6 +527,7 @@ SX1278_Status_t SX1278_ClearIrqFlags(SX1278_Handle_t *radio, uint8_t irq_flags)
     return status;
 }
 
+/** @copydoc SX1278_StartReceiveContinuous */
 SX1278_Status_t SX1278_StartReceiveContinuous(SX1278_Handle_t *radio)
 {
     SX1278_Status_t status = SX1278_Validate(radio);
@@ -552,6 +552,13 @@ SX1278_Status_t SX1278_StartReceiveContinuous(SX1278_Handle_t *radio)
     return SX1278_SetMode(radio, SX1278_MODE_RX_CONTINUOUS);
 }
 
+/**
+ * @copydoc SX1278_Transmit
+ *
+ * Communication-spine note:
+ * - G2S_Link_SendEvent() and G2S_Link_SendTelemetry() eventually reach this API
+ * - successful transmit returns the radio to RX continuous mode for the next uplink
+ */
 SX1278_Status_t SX1278_Transmit(SX1278_Handle_t *radio, const uint8_t *payload, uint8_t length, uint32_t timeout_ms)
 {
     uint8_t irq_flags = 0U;
@@ -625,6 +632,13 @@ SX1278_Status_t SX1278_Transmit(SX1278_Handle_t *radio, const uint8_t *payload, 
     return SX1278_STATUS_TIMEOUT;
 }
 
+/**
+ * @copydoc SX1278_Receive
+ *
+ * Communication-spine note:
+ * - CommTask reaches this API through G2S_Link_Process()
+ * - the function only returns payload bytes after IRQ and length checks confirm a packet
+ */
 SX1278_Status_t SX1278_Receive(SX1278_Handle_t *radio, uint8_t *buffer, uint8_t *length)
 {
     uint8_t irq_flags = 0U;

@@ -1,8 +1,6 @@
-/*
- * IPMS.h
- *
- *  Created on: 12-Apr-2026
- *      Author: Codex
+/**
+ * @file IPMS.h
+ * @brief Public API for the Intelligent Power Management System.
  */
 
 #ifndef INC_IPMS_H_
@@ -123,18 +121,110 @@ typedef struct {
     uint32_t button_wakeups;
 } IPMS_StatusSnapshot_t;
 
+/**
+ * @brief Load the default voltage thresholds, debounce counts, and dwell times.
+ *
+ * @param config Destination configuration structure.
+ */
 void IPMS_GetDefaultConfig(IPMS_Config_t *config);
+
+/**
+ * @brief Initialize the IPMS state machine and runtime event queue.
+ *
+ * @param config Configuration to apply.
+ * @return Module status.
+ */
 IPMS_Status_t IPMS_Init(const IPMS_Config_t *config);
+
+/**
+ * @brief Feed one battery sample into the IPMS state machine.
+ *
+ * The function updates measured/effective voltage, derives the desired state,
+ * debounces transitions across samples, and commits a state change once the
+ * required confirmation threshold is met.
+ *
+ * @param measured_battery_voltage Latest measured battery voltage.
+ * @param now_ms Timestamp associated with this sample.
+ * @return Module status.
+ *
+ * @callgraph
+ * @callergraph
+ */
 IPMS_Status_t IPMS_ProcessBatterySample(float measured_battery_voltage, uint32_t now_ms);
+
+/**
+ * @brief Change the active simulation mode.
+ *
+ * @param mode Requested simulation mode.
+ * @param now_ms Timestamp associated with the mode change.
+ * @return Module status.
+ */
 IPMS_Status_t IPMS_SetSimulationMode(IPMS_SimulationMode_t mode, uint32_t now_ms);
+
+/**
+ * @brief Change the active power policy mode.
+ *
+ * @param mode Requested policy mode.
+ * @param now_ms Timestamp associated with the mode change.
+ * @return Module status.
+ */
 IPMS_Status_t IPMS_SetPolicyMode(IPMS_PolicyMode_t mode, uint32_t now_ms);
+
+/**
+ * @brief Snapshot externally visible IPMS status.
+ *
+ * @param snapshot Destination snapshot structure.
+ */
 void IPMS_GetStatus(IPMS_StatusSnapshot_t *snapshot);
+
+/**
+ * @brief Pop the oldest pending IPMS event from the internal queue.
+ *
+ * @param event Destination event structure.
+ * @return true if an event was returned.
+ */
 bool IPMS_PopEvent(IPMS_Event_t *event);
+
+/**
+ * @brief Retrieve and clear the next pending low-power action request.
+ *
+ * @param request Destination action structure.
+ * @return true if an action was available.
+ */
 bool IPMS_GetPendingAction(IPMS_ActionRequest_t *request);
+
+/**
+ * @brief Arm the RTC wakeup timer for a low-power dwell interval.
+ *
+ * @param hrtc RTC handle used for wakeup programming.
+ * @param duration_ms Requested wakeup interval in milliseconds.
+ * @return Module status.
+ */
 IPMS_Status_t IPMS_ArmRtcWakeup(RTC_HandleTypeDef *hrtc, uint32_t duration_ms);
+
+/**
+ * @brief Disable the RTC wakeup timer.
+ *
+ * @param hrtc RTC handle used for wakeup programming.
+ */
 void IPMS_DisarmRtcWakeup(RTC_HandleTypeDef *hrtc);
+
+/**
+ * @brief Record that an RTC wakeup interrupt occurred.
+ */
 void IPMS_OnRtcWakeup(void);
+
+/**
+ * @brief Record that a button wakeup interrupt occurred.
+ */
 void IPMS_OnButtonWakeup(void);
+
+/**
+ * @brief Finalize wakeup bookkeeping after the MCU resumes.
+ *
+ * @param wake_source Wake source if already known, or UNKNOWN to infer it.
+ * @param now_ms Timestamp associated with the wakeup.
+ */
 void IPMS_RecordWakeup(IPMS_WakeSource_t wake_source, uint32_t now_ms);
 const char *IPMS_StatusToString(IPMS_Status_t status);
 const char *IPMS_PowerStateToString(IPMS_PowerState_t state);

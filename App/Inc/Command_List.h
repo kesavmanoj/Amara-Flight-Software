@@ -1,8 +1,6 @@
-/*
- * Command_List.h
- *
- *  Created on: 21-Mar-2026
- *      Author: KESAV
+/**
+ * @file Command_List.h
+ * @brief Transport-agnostic command dispatch table and command execution API.
  */
 
 #ifndef INC_COMMAND_LIST_H_
@@ -40,7 +38,18 @@ typedef struct {
 extern const CommandEntry_t command_table[];
 extern const uint32_t command_count;
 
+/**
+ * @brief Parse, normalize, and dispatch one complete command line.
+ *
+ * Both console UART input and radio/G2S command packets converge on this API so that
+ * command behavior stays independent of the ingress transport.
+ *
+ * @param cmd_line Null-terminated command line to dispatch.
+ * @return Result structure describing command id, ACK code, and execution status.
+ */
 Command_Result_t Command_DispatchLine(const char *cmd_line);
+
+/** @brief Convert command execution status codes into printable strings. */
 const char *Command_StatusToString(Command_Status_t status);
 
 #endif /* INC_COMMAND_LIST_H_ */

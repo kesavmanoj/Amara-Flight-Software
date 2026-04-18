@@ -1,8 +1,6 @@
-/*
- * System_Runtime.c
- *
- *  Created on: 14-Apr-2026
- *      Author: Codex
+/**
+ * @file System_Runtime.c
+ * @brief Runtime integration for IPMS events and low-power entry/exit handling.
  */
 
 #include "System_Runtime.h"
@@ -63,6 +61,15 @@ const char *SystemRuntime_TelemetryTimestampSourceToString(TelemetryTimestampSou
     }
 }
 
+/**
+ * @brief Drain queued IPMS events and forward them to logger and telemetry.
+ *
+ * This function is the integration boundary between the internal IPMS event queue and
+ * the system's observability outputs. It repeatedly pops queued power-management
+ * events, formats them for human-readable logging, and mirrors the same state, mode,
+ * and wake information into telemetry event packets so external observers can
+ * correlate power-state behavior with the rest of the runtime.
+ */
 void SystemRuntime_ReportIpmsEvents(void)
 {
     IPMS_Event_t event;
@@ -308,6 +315,15 @@ static bool SystemRuntime_WaitForAdcSample(ADC_HealthData_t *sample, uint32_t ti
     return false;
 }
 
+/**
+ * @brief Execute one pending IPMS low-power action and perform restore/reassess logic.
+ *
+ * This is the runtime helper that turns an IPMS state-machine output into actual MCU
+ * low-power behavior. It arms RTC wakeup, prepares peripherals for sleep or stop,
+ * enters the requested HAL power mode, records the wakeup source, restores the
+ * minimum or full peripheral set as appropriate, and re-samples IPMS state after
+ * wake so repeated stop chunks can continue until recovery criteria are satisfied.
+ */
 void SystemRuntime_ExecuteIpmsAction(SystemRuntimeContext_t *context,
                                      const SystemRuntimeHooks_t *hooks,
                                      const IPMS_ActionRequest_t *request)

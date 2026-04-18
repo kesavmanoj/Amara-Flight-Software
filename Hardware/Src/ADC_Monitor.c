@@ -1,3 +1,8 @@
+/**
+ * @file ADC_Monitor.c
+ * @brief ADC DMA-backed health-monitor implementation.
+ */
+
 #include "adc_monitor.h"
 #include <string.h>
 #include "Logger.h"
@@ -66,6 +71,7 @@ static float ADC_CalcVoltage(uint16_t raw, float vdda)
 
 /* ================= PUBLIC API ================= */
 
+/** @copydoc ADC_Monitor_Init */
 ADC_Monitor_Status_t ADC_Monitor_Init(ADC_HandleTypeDef *hadc)
 {
     if (hadc == NULL)
@@ -77,6 +83,7 @@ ADC_Monitor_Status_t ADC_Monitor_Init(ADC_HandleTypeDef *hadc)
     return ADC_MONITOR_OK;
 }
 
+/** @copydoc ADC_Monitor_Start */
 ADC_Monitor_Status_t ADC_Monitor_Start(void)
 {
     if (pAdc == NULL)
@@ -88,6 +95,7 @@ ADC_Monitor_Status_t ADC_Monitor_Start(void)
     return ADC_MONITOR_OK;
 }
 
+/** @copydoc ADC_Monitor_Stop */
 ADC_Monitor_Status_t ADC_Monitor_Stop(void)
 {
     if (pAdc == NULL)
@@ -101,6 +109,14 @@ ADC_Monitor_Status_t ADC_Monitor_Stop(void)
     return ADC_MONITOR_OK;
 }
 
+/**
+ * @copydoc ADC_Monitor_GetData
+ *
+ * Runtime ownership note:
+ * - DMA/ISR context produces raw samples into @ref proc_buffer.
+ * - task context consumes one fresh snapshot through this API.
+ * - HealthPowerTask is the main runtime owner of this foreground read path.
+ */
 ADC_Monitor_Status_t ADC_Monitor_GetData(ADC_HealthData_t *data)
 {
     if (data == NULL)
@@ -135,6 +151,7 @@ ADC_Monitor_Status_t ADC_Monitor_GetData(ADC_HealthData_t *data)
 }
 
 /* ================= DMA CALLBACK ================= */
+/** @copydoc ADC_Monitor_ConvCpltCallback */
 void ADC_Monitor_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
     if (hadc != pAdc)
@@ -158,6 +175,7 @@ void ADC_Monitor_ConvCpltCallback(ADC_HandleTypeDef *hadc)
  * the cycle repeats continuously.
  */
 
+/** @copydoc ADC_Monitor_StatusToString */
 const char *ADC_Monitor_StatusToString(ADC_Monitor_Status_t status)
 {
     switch(status)

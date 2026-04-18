@@ -315,11 +315,11 @@ bool Telemetry_QueuePacket(TelemetryPacketID_t id, const uint8_t *payload, uint1
 /**
  * @copydoc Telemetry_ProcessStep
  *
- * Internal state machine:
- * 1. Claim processing ownership with process_active.
- * 2. Load one frame from queue into tx_frame if no frame is pending.
- * 3. Attempt configured transport path(s) using a local snapshot.
- * 4. Clear pending only when delivery policy is satisfied.
+ * This is the telemetry transport owner for one queued frame. Producers only enqueue
+ * packets; they do not transmit directly. Each call claims processing ownership,
+ * loads at most one pending frame into the transmit buffer, snapshots the selected
+ * downlink mode, attempts radio and/or UART delivery according to that policy, and
+ * clears the pending frame only after the configured delivery path succeeds.
  */
 Telemetry_Status_t Telemetry_ProcessStep(G2S_Link_Handle_t *g2s_link){
 	UART_Driver_Status_t uart_status = UART_DRIVER_OK;

@@ -1,8 +1,6 @@
-/*
- * Command_List.c
- *
- *  Created on: 21-Mar-2026
- *      Author: KESAV
+/**
+ * @file Command_List.c
+ * @brief Command-dispatch table and handler implementations.
  */
 #include "Command_List.h"
 #include "UART_Driver.h"
@@ -536,6 +534,7 @@ static Command_Status_t CMD_SD_TEST(int argc, char *argv[], Command_Result_t *re
     return COMMAND_STATUS_OK;
 }
 
+/** @brief Static command table walked by @ref Command_DispatchLine. */
 const CommandEntry_t command_table[] = {
 		{"PING"		, 		CMD_PING	 },
 		{"GET_ADC"	, 		CMD_GET_ADC	 },
@@ -550,6 +549,14 @@ const CommandEntry_t command_table[] = {
 const uint32_t command_count =
     sizeof(command_table) / sizeof(CommandEntry_t);
 
+/**
+ * @copydoc Command_DispatchLine
+ *
+ * Runtime ownership note:
+ * - console UART commands reach this function through CommandParser_Process()
+ * - radio commands reach this function through G2S_Link_Process()
+ * - command handlers may emit ACK telemetry, event telemetry, and runtime state changes
+ */
 Command_Result_t Command_DispatchLine(const char *cmd_line)
 {
 	Command_Result_t result;
@@ -592,6 +599,7 @@ Command_Result_t Command_DispatchLine(const char *cmd_line)
 	return result;
 }
 
+/** @copydoc Command_StatusToString */
 const char *Command_StatusToString(Command_Status_t status)
 {
 	switch(status){

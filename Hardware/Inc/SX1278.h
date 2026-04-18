@@ -1,8 +1,6 @@
-/*
- * SX1278.h
- *
- *  Created on: 12-Apr-2026
- *      Author: Codex
+/**
+ * @file SX1278.h
+ * @brief SX1278 LoRa radio driver API used by the G2S link layer.
  */
 
 #ifndef INC_SX1278_H_
@@ -58,6 +56,13 @@ typedef struct {
     SX1278_Runtime_t state;
 } SX1278_Handle_t;
 
+/**
+ * @brief Initialize the SX1278 radio driver and program default modem settings.
+ *
+ * This binds the SPI device, applies an optional hardware reset pulse, verifies the
+ * version register, programs default frequency/sync word/preamble settings, and
+ * returns the radio to continuous receive mode.
+ */
 SX1278_Status_t SX1278_Init(SX1278_Handle_t *radio,
                             SPI_HandleTypeDef *hspi,
                             GPIO_TypeDef *cs_port,
@@ -66,21 +71,37 @@ SX1278_Status_t SX1278_Init(SX1278_Handle_t *radio,
                             uint16_t reset_pin,
                             bool has_reset_pin);
 
+/** @brief Apply a hardware reset pulse and return the radio to standby mode. */
 SX1278_Status_t SX1278_Reset(SX1278_Handle_t *radio);
+/** @brief Read one radio register. */
 SX1278_Status_t SX1278_ReadRegister(SX1278_Handle_t *radio, uint8_t reg, uint8_t *value);
+/** @brief Write one radio register. */
 SX1278_Status_t SX1278_WriteRegister(SX1278_Handle_t *radio, uint8_t reg, uint8_t value);
+/** @brief Read a contiguous register or FIFO range. */
 SX1278_Status_t SX1278_ReadBurst(SX1278_Handle_t *radio, uint8_t reg, uint8_t *buffer, uint8_t length);
+/** @brief Write a contiguous register or FIFO range. */
 SX1278_Status_t SX1278_WriteBurst(SX1278_Handle_t *radio, uint8_t reg, const uint8_t *buffer, uint8_t length);
+/** @brief Switch the radio into the requested operating mode. */
 SX1278_Status_t SX1278_SetMode(SX1278_Handle_t *radio, SX1278_Mode_t mode);
+/** @brief Program the RF carrier frequency in hertz. */
 SX1278_Status_t SX1278_SetFrequencyHz(SX1278_Handle_t *radio, uint32_t frequency_hz);
+/** @brief Program the LoRa sync word used to match packets on-air. */
 SX1278_Status_t SX1278_SetSyncWord(SX1278_Handle_t *radio, uint8_t sync_word);
+/** @brief Program the transmit/receive preamble length. */
 SX1278_Status_t SX1278_SetPreambleLength(SX1278_Handle_t *radio, uint16_t preamble_length);
+/** @brief Read and cache the current IRQ flags. */
 SX1278_Status_t SX1278_GetIrqFlags(SX1278_Handle_t *radio, uint8_t *irq_flags);
+/** @brief Clear one or more IRQ flags on the radio. */
 SX1278_Status_t SX1278_ClearIrqFlags(SX1278_Handle_t *radio, uint8_t irq_flags);
+/** @brief Put the radio into continuous receive mode for packet ingress. */
 SX1278_Status_t SX1278_StartReceiveContinuous(SX1278_Handle_t *radio);
+/** @brief Transmit one payload buffer and wait for TX-done indication. */
 SX1278_Status_t SX1278_Transmit(SX1278_Handle_t *radio, const uint8_t *payload, uint8_t length, uint32_t timeout_ms);
+/** @brief Receive one payload buffer when the radio reports RX-done. */
 SX1278_Status_t SX1278_Receive(SX1278_Handle_t *radio, uint8_t *buffer, uint8_t *length);
+/** @brief Read the hardware version register. */
 SX1278_Status_t SX1278_ReadVersion(SX1278_Handle_t *radio, uint8_t *version);
+/** @brief Convert SX1278 status codes into printable strings. */
 const char *SX1278_StatusToString(SX1278_Status_t status);
 
 #endif /* INC_SX1278_H_ */

@@ -1,8 +1,6 @@
-/*
- * IPMS.c
- *
- *  Created on: 12-Apr-2026
- *      Author: Codex
+/**
+ * @file IPMS.c
+ * @brief Intelligent Power Management System implementation.
  */
 
 #include "IPMS.h"
@@ -126,7 +124,14 @@ static void IPMS_PostModeEvent(IPMS_EventType_t type, IPMS_Reason_t reason, uint
     IPMS_PushEvent(&event);
 }
 
-/* Must be called with IPMS critical section held. */
+/**
+ * @brief Resolve the voltage that the IPMS state machine should act on.
+ *
+ * Must be called with the IPMS critical section held.
+ *
+ * @param measured_voltage Latest measured battery voltage.
+ * @return Effective voltage used for power-state decisions.
+ */
 static float IPMS_ResolveEffectiveBattery(float measured_voltage)
 {
     switch (g_ipms.simulation_mode)
@@ -141,7 +146,14 @@ static float IPMS_ResolveEffectiveBattery(float measured_voltage)
     }
 }
 
-/* Must be called with IPMS critical section held. */
+/**
+ * @brief Choose the next desired state from the current effective battery voltage.
+ *
+ * Must be called with the IPMS critical section held.
+ *
+ * @param battery_voltage Effective battery voltage after simulation override.
+ * @return Desired power state before debounce is applied.
+ */
 static IPMS_PowerState_t IPMS_GetDesiredState(float battery_voltage)
 {
     switch (g_ipms.power_state)
@@ -216,7 +228,14 @@ static IPMS_PowerState_t IPMS_GetDesiredState(float battery_voltage)
     }
 }
 
-/* Must be called with IPMS critical section held. */
+/**
+ * @brief Return the required number of consecutive samples for a candidate state.
+ *
+ * Must be called with the IPMS critical section held.
+ *
+ * @param state Candidate state being evaluated.
+ * @return Required sample count before the state is committed.
+ */
 static uint8_t IPMS_GetRequiredSamples(IPMS_PowerState_t state)
 {
     switch (state)
@@ -234,7 +253,15 @@ static uint8_t IPMS_GetRequiredSamples(IPMS_PowerState_t state)
     }
 }
 
-/* Must be called with IPMS critical section held. */
+/**
+ * @brief Commit a power-state transition and arm any matching low-power action.
+ *
+ * Must be called with the IPMS critical section held.
+ *
+ * @param new_state State to commit.
+ * @param reason Transition reason for logging and telemetry.
+ * @param now_ms Timestamp associated with the transition.
+ */
 static void IPMS_ApplyState(IPMS_PowerState_t new_state, IPMS_Reason_t reason, uint32_t now_ms)
 {
     IPMS_PowerState_t old_state = g_ipms.power_state;
@@ -322,6 +349,16 @@ IPMS_Status_t IPMS_Init(const IPMS_Config_t *config)
     return IPMS_STATUS_OK;
 }
 
+/**
+ * @brief Feed one battery sample into the IPMS state machine.
+ *
+ * This function is the decision-engine entrypoint for battery-driven power policy.
+ * It updates measured and effective battery voltage, derives the target state from
+ * the configured threshold bands, debounces transitions across samples, and commits
+ * a new state once the confirmation threshold is met. It does not enter low power
+ * directly; instead it may queue IPMS events and arm a pending action that
+ * System_Runtime executes later.
+ */
 IPMS_Status_t IPMS_ProcessBatterySample(float measured_battery_voltage, uint32_t now_ms)
 {
     IPMS_PowerState_t desired_state;

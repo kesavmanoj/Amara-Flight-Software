@@ -1,8 +1,6 @@
-/*
- * Storage_Service.c
- *
- *  Created on: 14-Apr-2026
- *      Author: Codex
+/**
+ * @file Storage_Service.c
+ * @brief Queue-backed SD/FatFs persistence service owned by StorageLogTask.
  */
 
 #include "Storage_Service.h"
@@ -203,6 +201,16 @@ static bool StorageService_OpenOrCreateLogFile(void)
     return true;
 }
 
+/**
+ * @brief Flush the active log file according to size/time policy or a forced request.
+ *
+ * This helper is the buffered-persistence boundary. It decides when queued log bytes
+ * must cross the FatFs sync boundary and closes the mount on sync failures so later
+ * requests see a clean remount path.
+ *
+ * @param force When true, flush immediately regardless of thresholds.
+ * @return true if the file is already clean or the flush succeeded.
+ */
 static bool StorageService_FlushLogFile(bool force)
 {
     uint32_t now = HAL_GetTick();
@@ -235,6 +243,14 @@ static bool StorageService_FlushLogFile(bool force)
     return true;
 }
 
+/**
+ * @brief Rotate to the next bounded log file when the active file reaches capacity.
+ *
+ * Rotation is performed inside the storage task so producers never need to reason
+ * about file ownership or FatFs state.
+ *
+ * @return true on success, false if the rotation path failed.
+ */
 static bool StorageService_RotateLogFile(void)
 {
     uint8_t next_index;
@@ -282,6 +298,16 @@ static void StorageService_MaybeRotateLogFile(void)
     }
 }
 
+/**
+ * @brief Append one queued log record to persistent storage.
+ *
+ * This function is the log-persistence execution step owned by StorageLogTask. It
+ * opens or creates the active file on demand, writes the copied record, updates the
+ * buffered-flush counters, and triggers file rotation when the current log reaches
+ * its configured size limit.
+ *
+ * @param record Bounded queue record copied from the producer side.
+ */
 static void StorageService_AppendLogRecord(const StorageService_LogRecord_t *record)
 {
     UINT bytes_written = 0U;
@@ -417,6 +443,7 @@ static void StorageService_HandleSmokeTest(StorageService_SmokeTestResult_t *res
     result->op_status = (result->fatfs_result == FR_OK) ? STORAGE_OP_STATUS_OK : STORAGE_OP_STATUS_IO_ERROR;
 }
 
+/** @copydoc StorageService_Init */
 void StorageService_Init(void)
 {
     if (g_storage_command_queue == NULL)
@@ -436,6 +463,7 @@ void StorageService_Init(void)
     memset(&g_storage_context, 0, sizeof(g_storage_context));
 }
 
+/** @copydoc StorageService_RunTask */
 void StorageService_RunTask(void)
 {
     for (;;)
@@ -444,6 +472,15 @@ void StorageService_RunTask(void)
     }
 }
 
+/**
+ * @copydoc StorageService_ProcessNext
+ *
+ * Runtime ownership note:
+ * - command-driven SD requests are serviced first
+ * - log persistence is serviced second
+ * - flush policy is evaluated even on idle timeouts so buffered data still reaches
+ *   storage without requiring constant log traffic
+ */
 bool StorageService_ProcessNext(uint32_t timeout_ms)
 {
     StorageService_Request_t request;
@@ -523,18 +560,21 @@ static StorageService_Status_t StorageService_SubmitRequest(StorageService_Reque
     return STORAGE_SERVICE_STATUS_OK;
 }
 
+/** @copydoc StorageService_RequestSdStatus */
 StorageService_Status_t StorageService_RequestSdStatus(StorageService_SdStatusResult_t *result,
                                                        uint32_t timeout_ms)
 {
     return StorageService_SubmitRequest(STORAGE_REQUEST_SD_STATUS, result, timeout_ms);
 }
 
+/** @copydoc StorageService_RequestSmokeTest */
 StorageService_Status_t StorageService_RequestSmokeTest(StorageService_SmokeTestResult_t *result,
                                                         uint32_t timeout_ms)
 {
     return StorageService_SubmitRequest(STORAGE_REQUEST_SMOKE_TEST, result, timeout_ms);
 }
 
+/** @copydoc StorageService_EnqueueLogLine */
 StorageService_Status_t StorageService_EnqueueLogLine(const char *line, uint16_t len)
 {
     StorageService_LogRecord_t record;
@@ -564,6 +604,7 @@ StorageService_Status_t StorageService_EnqueueLogLine(const char *line, uint16_t
     return STORAGE_SERVICE_STATUS_OK;
 }
 
+/** @copydoc StorageService_GetStats */
 void StorageService_GetStats(StorageService_Stats_t *stats)
 {
     if (stats == NULL)
@@ -578,6 +619,7 @@ void StorageService_GetStats(StorageService_Stats_t *stats)
     stats->active_log_file_size = g_storage_context.active_log_size;
 }
 
+/** @copydoc StorageService_StatusToString */
 const char *StorageService_StatusToString(StorageService_Status_t status)
 {
     switch (status)
@@ -596,6 +638,7 @@ const char *StorageService_StatusToString(StorageService_Status_t status)
     }
 }
 
+/** @copydoc StorageService_OpStatusToString */
 const char *StorageService_OpStatusToString(StorageService_OpStatus_t status)
 {
     switch (status)

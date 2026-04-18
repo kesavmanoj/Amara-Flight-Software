@@ -1,8 +1,6 @@
-/*
- * Command_Parser.c
- *
- *  Created on: 20-Mar-2026
- *      Author: KESAV
+/**
+ * @file Command_Parser.c
+ * @brief Console UART byte-stream parser implementation.
  */
 
 
@@ -16,6 +14,13 @@
 static char cmd_buffer[COMMAND_MAX_LINE_LENGTH];
 static uint16_t cmd_index = 0;
 
+/**
+ * @brief Consume one console byte and update the current command-line buffer.
+ *
+ * Bytes are appended until a line terminator arrives. At that point the buffered line
+ * is dispatched through @ref Command_DispatchLine. Overflow resets the line buffer and
+ * reports the condition through logging, telemetry, and a console error response.
+ */
 static void CommandParser_ProcessByte(uint8_t byte)
 {
 	if ((byte == '\r') || (byte == '\n'))
@@ -43,6 +48,13 @@ static void CommandParser_ProcessByte(uint8_t byte)
 
 // API Functions
 
+/**
+ * @copydoc CommandParser_Process
+ *
+ * Runtime ownership note:
+ * - UART_RxCpltCallback() only queues bytes
+ * - CommTask later consumes queued bytes in task context through this function
+ */
 void CommandParser_Process(void)
 {
 	uint8_t byte;
@@ -52,6 +64,7 @@ void CommandParser_Process(void)
 	}
 }
 
+/** @copydoc CommandParser_Init */
 void CommandParser_Init(void)
 {
 	cmd_index = 0U;

@@ -19,6 +19,11 @@ FATFS/
 .metadata/
 *.log
 
+# Documentation
+docs/
+Doxyfile
+warnings.log
+
 # OS files
 .DS_Store
 Thumbs.db

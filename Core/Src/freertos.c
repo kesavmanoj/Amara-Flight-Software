@@ -1,8 +1,8 @@
 /* USER CODE BEGIN Header */
 /**
   ******************************************************************************
-  * File Name          : freertos.c
-  * Description        : Code for freertos applications
+  * @file              freertos.c
+  * @brief             FreeRTOS task creation and runtime task ownership.
   ******************************************************************************
   * @attention
   *
@@ -138,6 +138,20 @@ void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 void vApplicationStackOverflowHook(xTaskHandle xTask, signed char *pcTaskName);
 
 /* USER CODE BEGIN 4 */
+/**
+ * @brief Wake CommTask from ISR context when new UART RX work arrives.
+ */
+void RTOS_NotifyCommTaskRxFromISR(void)
+{
+    if ((osKernelGetState() == osKernelRunning) && (CommTaskHandle != NULL))
+    {
+        (void)osThreadFlagsSet(CommTaskHandle, RTOS_COMM_WAKE_FLAG);
+    }
+}
+
+/**
+ * @brief Record a heartbeat timestamp for one supervised task.
+ */
 static void RTOS_MarkTaskAlive(RTOS_TaskId_t task_id)
 {
     if (task_id < RTOS_TASK_ID_COUNT)
@@ -213,14 +227,14 @@ static void RTOS_LogWatchdogFaultMask(uint32_t fault_mask)
     }
 }
 
-void RTOS_NotifyCommTaskRxFromISR(void)
-{
-    if ((osKernelGetState() == osKernelRunning) && (CommTaskHandle != NULL))
-    {
-        (void)osThreadFlagsSet(CommTaskHandle, RTOS_COMM_WAKE_FLAG);
-    }
-}
-
+/**
+ * @brief Run one communication cycle owned by CommTask.
+ *
+ * This helper keeps command ingress and communication egress tied to the task that
+ * reacts to RX wakeups. One cycle services console command parsing, advances one G2S
+ * radio receive/ack step, and gives the telemetry module one opportunity to progress
+ * a queued frame through its transport state machine.
+ */
 static void RTOS_RunCommTaskCycle(void)
 {
     G2S_Link_Handle_t *g2s_link = RuntimeResources_GetG2SLink();
@@ -237,6 +251,14 @@ static void RTOS_RunCommTaskCycle(void)
     }
 }
 
+/**
+ * @brief Run one periodic telemetry and radio reporting cycle.
+ *
+ * This helper is the producer-side scheduler for recurring telemetry work. It does
+ * not transmit frames directly; instead it decides when heartbeat, system-status,
+ * ADC-health, and radio-health packets should be enqueued so the telemetry transport
+ * owner can send them later from CommTask.
+ */
 static void RTOS_RunTelemetryRadioTaskCycle(void)
 {
     static uint32_t last_telem_queue_ms = 0U;
@@ -328,6 +350,16 @@ static void RTOS_RunTelemetryRadioTaskCycle(void)
     }
 }
 
+/**
+ * @brief Run one health, watchdog, ADC, and power-management cycle.
+ *
+ * This helper is the central runtime health supervisor. Each cycle drains queued
+ * IPMS control requests, reports queued IPMS events, snapshots ADC data into runtime
+ * state, feeds battery data into the IPMS state machine, emits health telemetry, and
+ * either refreshes or withholds the watchdog according to per-task heartbeat
+ * supervision. If IPMS arms a low-power action, this cycle also hands it to
+ * System_Runtime for actual sleep or stop execution.
+ */
 static void RTOS_RunHealthPowerTaskCycle(void)
 {
     static uint32_t last_heartbeat_ms = 0U;
@@ -451,7 +483,15 @@ void vApplicationStackOverflowHook(xTaskHandle xTask, signed char *pcTaskName)
 /* USER CODE END 4 */
 
 /**
-  * @brief  FreeRTOS initialization
+  * @brief  Create RTOS-owned synchronization objects, services, and worker tasks.
+  *
+  * This is the scheduler-side construction boundary for the application runtime. It
+  * initializes the storage service, resets task-heartbeat supervision state, creates
+  * the mutexes used by shared services, and instantiates the four primary worker
+  * tasks: CommTask, TelemetryRadioTask, HealthPowerTask, and StorageLogTask.
+  * Periodic firmware behavior begins only after these objects are created and
+  * osKernelStart() is called from main().
+  *
   * @param  None
   * @retval None
   */
@@ -509,8 +549,14 @@ void MX_FREERTOS_Init(void) {
 
 /* USER CODE BEGIN Header_StartCommTask */
 /**
-  * @brief  Function implementing the CommTask thread.
-  * @param  argument: Not used
+  * @brief  CommTask entrypoint for command ingress and communication progress.
+  *
+  * The task blocks on a thread flag set from UART RX ISR context, with a bounded
+  * timeout so transport progress cannot stall indefinitely if no new bytes arrive.
+  * On each wake it records a task heartbeat and runs RTOS_RunCommTaskCycle(), which
+  * owns command parsing, G2S uplink processing, and one telemetry transport step.
+  *
+  * @param  argument Not used.
   * @retval None
   */
 /* USER CODE END Header_StartCommTask */
@@ -529,8 +575,14 @@ void StartCommTask(void *argument)
 
 /* USER CODE BEGIN Header_StartTelemetryRadioTask */
 /**
-* @brief Function implementing the TelemetryRadioTask thread.
-* @param argument: Not used
+* @brief Periodic producer task for telemetry scheduling and radio health reporting.
+*
+* This task owns the cadence of recurring telemetry producers. It marks its heartbeat,
+* runs RTOS_RunTelemetryRadioTaskCycle() once per period, and uses vTaskDelayUntil()
+* so heartbeat and status production stay on a stable time base rather than drifting
+* with execution time.
+*
+* @param argument Not used.
 * @retval None
 */
 /* USER CODE END Header_StartTelemetryRadioTask */
@@ -551,8 +603,13 @@ void StartTelemetryRadioTask(void *argument)
 
 /* USER CODE BEGIN Header_StartHealthPowerTask */
 /**
-* @brief Function implementing the HealthPowerTask thread.
-* @param argument: Not used
+* @brief Periodic supervisor task for ADC health, IPMS, and watchdog decisions.
+*
+* This task owns the fixed-cadence health loop. It marks its heartbeat, executes
+* RTOS_RunHealthPowerTaskCycle(), and delays with vTaskDelayUntil() so ADC/IPMS
+* sampling, event reporting, and watchdog supervision occur at a predictable rate.
+*
+* @param argument Not used.
 * @retval None
 */
 /* USER CODE END Header_StartHealthPowerTask */
@@ -572,8 +629,13 @@ void StartHealthPowerTask(void *argument)
 
 /* USER CODE BEGIN Header_StartStorageLogTask */
 /**
-* @brief Function implementing the StorageLogTask thread.
-* @param argument: Not used
+* @brief Serialized storage worker for log persistence and explicit SD requests.
+*
+* This task isolates potentially blocking FatFs/SD interactions from the rest of the
+* runtime. It marks its heartbeat and services queued log records plus command-driven
+* storage requests through the StorageService layer.
+*
+* @param argument Not used.
 * @retval None
 */
 /* USER CODE END Header_StartStorageLogTask */
@@ -592,4 +654,3 @@ void StartStorageLogTask(void *argument)
 /* USER CODE BEGIN Application */
 
 /* USER CODE END Application */
-

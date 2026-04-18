@@ -1,8 +1,6 @@
-/*
- * UART_Driver.c
- *
- *  Created on: 20-Mar-2026
- *      Author: KESAV
+/**
+ * @file UART_Driver.c
+ * @brief UART transport implementation with ISR RX and DMA-backed TX queues.
  */
 #include "UART_Driver.h"
 
@@ -137,6 +135,7 @@ static UART_Driver_Status_t UART_StartTxDMA(UART_ChannelState_t *channel)
 
 // API FUNCTIONS
 
+/** @copydoc UART_Driver_Init */
 UART_Driver_Status_t UART_Driver_Init(UART_HandleTypeDef *huart){
 	return UART_Driver_InitChannel(UART_DRIVER_CHANNEL_CONSOLE, huart);
 }
@@ -148,6 +147,13 @@ UART_Driver_Status_t UART_Driver_Init(UART_HandleTypeDef *huart){
 	then initialises a ringbuffer and enables its recieve interrupt
 */
 
+/**
+ * @copydoc UART_Driver_InitChannel
+ *
+ * Communication-spine note:
+ * - the console channel feeds CommandParser_Process()
+ * - the telemetry channel is used by Telemetry_ProcessStep() for UART downlink
+ */
 UART_Driver_Status_t UART_Driver_InitChannel(UART_Driver_Channel_t channel, UART_HandleTypeDef *huart){
 	UART_ChannelState_t *state = UART_GetChannel(channel);
 
@@ -171,23 +177,33 @@ UART_Driver_Status_t UART_Driver_InitChannel(UART_Driver_Channel_t channel, UART
 }
 
 // RX (only one global buffer is used here as only one source of rx is used)
+/** @copydoc UART_ReadByte */
 bool UART_ReadByte(uint8_t *data){
 	return RingBuffer_Pop(&rx_buffer, data);
 }
 
+/** @copydoc UART_Available */
 uint16_t UART_Available(void){
 	return RingBuffer_Available(&rx_buffer);
 }
 
+/** @copydoc UART_GetRxOverflowCount */
 uint32_t UART_GetRxOverflowCount(void){
 	return rx_overflow_count;
 }
 
 // TX
+/** @copydoc UART_Write */
 UART_Driver_Status_t UART_Write(uint8_t *data, uint16_t len){
 	return UART_WriteChannel(UART_DRIVER_CHANNEL_CONSOLE, data, len);
 }
 
+/**
+ * @copydoc UART_WriteChannel
+ *
+ * This is the primary non-blocking TX queue boundary for both console/log output and
+ * the UART telemetry downlink path.
+ */
 UART_Driver_Status_t UART_WriteChannel(UART_Driver_Channel_t channel, uint8_t *data, uint16_t len){
 	uint32_t primask;
 	UART_ChannelState_t *state = UART_GetChannel(channel);
@@ -216,12 +232,14 @@ UART_Driver_Status_t UART_WriteChannel(UART_Driver_Channel_t channel, uint8_t *d
 	return UART_DRIVER_OK;
 }
 
+/** @copydoc UART_WriteString */
 UART_Driver_Status_t UART_WriteString(const char *str){
 	if(str == NULL) return UART_DRIVER_INVALID_PARAM;
 
 	return UART_Write((uint8_t *)str, (uint16_t)strlen(str));
 }
 
+/** @copydoc UART_Driver_StatusToString */
 const char *UART_Driver_StatusToString(UART_Driver_Status_t status)
 {
 	switch(status){
@@ -242,6 +260,13 @@ const char *UART_Driver_StatusToString(UART_Driver_Status_t status)
 }
 
 // IRQ Handler
+/**
+ * @copydoc UART_RxCpltCallback
+ *
+ * Runtime ownership note:
+ * - ISR context only stores one byte and rearms reception
+ * - CommTask later consumes queued bytes in task context through CommandParser_Process()
+ */
 void UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart != pConsoleUart)
@@ -260,6 +285,7 @@ void UART_RxCpltCallback(UART_HandleTypeDef *huart)
     }
 }
 
+/** @copydoc UART_TxCpltCallback */
 void UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
 	uint32_t primask;
@@ -280,6 +306,7 @@ void UART_TxCpltCallback(UART_HandleTypeDef *huart)
 	UART_StartTxDMA(state);
 }
 
+/** @copydoc UART_ErrorCallback */
 void UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
 	uint32_t primask;
@@ -300,7 +327,6 @@ void UART_ErrorCallback(UART_HandleTypeDef *huart)
 
 	UART_StartTxDMA(state);
 }
-
 
 
 

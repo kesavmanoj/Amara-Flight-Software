@@ -1,8 +1,6 @@
-/*
- * G2S_Link.c
- *
- *  Created on: 12-Apr-2026
- *      Author: Codex
+/**
+ * @file G2S_Link.c
+ * @brief Ground-to-space packet transport built on top of the SX1278 radio driver.
  */
 
 #include "G2S_Link.h"
@@ -119,6 +117,38 @@ static G2S_Status_t G2S_SendPacket(G2S_Link_Handle_t *link, G2S_Packet_t *packet
     return G2S_STATUS_OK;
 }
 
+static G2S_Status_t G2S_SendTypedPacket(G2S_Link_Handle_t *link,
+                                        G2S_PacketType_t packet_type,
+                                        uint8_t destination,
+                                        const uint8_t *payload,
+                                        uint16_t payload_length)
+{
+    G2S_Packet_t packet;
+    G2S_Status_t status = G2S_Validate(link);
+
+    if (status != G2S_STATUS_OK)
+    {
+        return status;
+    }
+
+    status = G2S_BuildPacket(link,
+                             &packet,
+                             packet_type,
+                             destination,
+                             payload,
+                             payload_length,
+                             0U);
+    if (status != G2S_STATUS_OK)
+    {
+        link->stats.last_status = status;
+        return status;
+    }
+
+    status = G2S_SendPacket(link, &packet);
+    link->stats.last_status = status;
+    return status;
+}
+
 static G2S_Status_t G2S_SendCommandAckPacket(G2S_Link_Handle_t *link,
                                              uint8_t destination,
                                              uint16_t request_sequence,
@@ -220,6 +250,14 @@ G2S_Status_t G2S_Link_Init(G2S_Link_Handle_t *link, SX1278_Handle_t *radio, CRC_
     return G2S_STATUS_OK;
 }
 
+/**
+ * @brief Process one receive/command/ack cycle for the G2S link.
+ *
+ * This function is the wireless command-ingress step owned by CommTask. It gives the
+ * radio link one opportunity to receive a packet, validate framing and CRC, translate
+ * a command payload into the command-dispatch layer, and emit the matching ACK/NACK
+ * response so uplink control stays synchronized with the rest of the runtime.
+ */
 G2S_Status_t G2S_Link_Process(G2S_Link_Handle_t *link)
 {
     G2S_Packet_t rx_packet;
@@ -303,58 +341,20 @@ G2S_Status_t G2S_Link_Process(G2S_Link_Handle_t *link)
 
 G2S_Status_t G2S_Link_SendEvent(G2S_Link_Handle_t *link, const uint8_t *payload, uint16_t payload_length)
 {
-    G2S_Packet_t packet;
-    G2S_Status_t status = G2S_Validate(link);
-
-    if (status != G2S_STATUS_OK)
-    {
-        return status;
-    }
-
-    status = G2S_BuildPacket(link,
-                             &packet,
-                             G2S_PACKET_TYPE_EVENT,
-                             G2S_GROUND_NODE_ID,
-                             payload,
-                             payload_length,
-                             0U);
-    if (status != G2S_STATUS_OK)
-    {
-        link->stats.last_status = status;
-        return status;
-    }
-
-    status = G2S_SendPacket(link, &packet);
-    link->stats.last_status = status;
-    return status;
+    return G2S_SendTypedPacket(link,
+                               G2S_PACKET_TYPE_EVENT,
+                               G2S_GROUND_NODE_ID,
+                               payload,
+                               payload_length);
 }
 
 G2S_Status_t G2S_Link_SendTelemetry(G2S_Link_Handle_t *link, const uint8_t *payload, uint16_t payload_length)
 {
-    G2S_Packet_t packet;
-    G2S_Status_t status = G2S_Validate(link);
-
-    if (status != G2S_STATUS_OK)
-    {
-        return status;
-    }
-
-    status = G2S_BuildPacket(link,
-                             &packet,
-                             G2S_PACKET_TYPE_TELEMETRY,
-                             G2S_GROUND_NODE_ID,
-                             payload,
-                             payload_length,
-                             0U);
-    if (status != G2S_STATUS_OK)
-    {
-        link->stats.last_status = status;
-        return status;
-    }
-
-    status = G2S_SendPacket(link, &packet);
-    link->stats.last_status = status;
-    return status;
+    return G2S_SendTypedPacket(link,
+                               G2S_PACKET_TYPE_TELEMETRY,
+                               G2S_GROUND_NODE_ID,
+                               payload,
+                               payload_length);
 }
 
 void G2S_Link_GetStats(G2S_Link_Handle_t *link, G2S_Stats_t *stats)

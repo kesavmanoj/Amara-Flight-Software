@@ -85,10 +85,18 @@ void RTOS_NotifyCommTaskRxFromISR(void);
 /* USER CODE BEGIN 0 */
 /* USER CODE END 0 */
 
-/**
-  * @brief  The application entry point.
-  * @retval int
-  */
+  /**
+   * @brief  Perform one-time board bring-up and hand control to the RTOS runtime.
+   *
+   * This function is the firmware boot boundary. It performs HAL startup, clock and
+   * peripheral initialization, binds the shared runtime resource and hook structures,
+   * initializes project-owned modules such as UART transport, telemetry, IPMS, radio,
+   * ADC monitoring, and OLED support, then creates RTOS objects and starts the
+   * scheduler. After osKernelStart() succeeds, periodic behavior is task-owned rather
+   * than being driven from main().
+   *
+   * @retval int Unused. Execution is expected to remain under scheduler control.
+   */
 int main(void)
 {
 

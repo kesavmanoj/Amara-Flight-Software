@@ -1,8 +1,10 @@
-/*
- * G2S_Link.h
+/**
+ * @file G2S_Link.h
+ * @brief Ground-to-space packet protocol and LoRa radio-link API.
  *
- *  Created on: 12-Apr-2026
- *      Author: Codex
+ * This module sits above the SX1278 radio driver and below the transport-agnostic
+ * command and telemetry layers. It owns packet framing, CRC validation, command
+ * packet decode, ACK generation, and telemetry/event downlink over the radio path.
  */
 
 #ifndef INC_G2S_LINK_H_
@@ -82,11 +84,17 @@ typedef struct {
     bool initialized;
 } G2S_Link_Handle_t;
 
+/** @brief Initialize the G2S link with its radio and CRC resources. */
 G2S_Status_t G2S_Link_Init(G2S_Link_Handle_t *link, SX1278_Handle_t *radio, CRC_HandleTypeDef *crc);
+/** @brief Process one receive/dispatch/ack cycle for the radio command path. */
 G2S_Status_t G2S_Link_Process(G2S_Link_Handle_t *link);
+/** @brief Send one event packet over the G2S radio downlink. */
 G2S_Status_t G2S_Link_SendEvent(G2S_Link_Handle_t *link, const uint8_t *payload, uint16_t payload_length);
+/** @brief Send one telemetry packet over the G2S radio downlink. */
 G2S_Status_t G2S_Link_SendTelemetry(G2S_Link_Handle_t *link, const uint8_t *payload, uint16_t payload_length);
+/** @brief Snapshot current G2S counters into caller-provided storage. */
 void G2S_Link_GetStats(G2S_Link_Handle_t *link, G2S_Stats_t *stats);
+/** @brief Convert G2S status codes into printable strings. */
 const char *G2S_StatusToString(G2S_Status_t status);
 
 #endif /* INC_G2S_LINK_H_ */
