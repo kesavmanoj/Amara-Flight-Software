@@ -4,6 +4,7 @@
  */
 
 #include "IPMS.h"
+#include "Ring_Buffer.h"
 #include "rtc.h"
 #include <string.h>
 
@@ -32,9 +33,8 @@ typedef struct {
 } IPMS_Context_t;
 
 static IPMS_Context_t g_ipms;
-static IPMS_Event_t g_event_queue[IPMS_EVENT_QUEUE_SIZE];
-static volatile uint8_t g_event_head = 0U;
-static volatile uint8_t g_event_tail = 0U;
+static IPMS_Event_t g_event_queue_storage[IPMS_EVENT_QUEUE_SIZE];
+static FrameQueue_t g_event_queue;
 static volatile bool g_rtc_wakeup_seen = false;
 static volatile bool g_button_wakeup_seen = false;
 
@@ -68,21 +68,12 @@ static void IPMS_ResetContext(void)
 /* Must be called with IPMS critical section held. */
 static void IPMS_PushEvent(const IPMS_Event_t *event)
 {
-    uint8_t next_head;
-
     if (event == NULL)
     {
         return;
     }
 
-    next_head = (uint8_t)((g_event_head + 1U) % IPMS_EVENT_QUEUE_SIZE);
-    if (next_head == g_event_tail)
-    {
-        g_event_tail = (uint8_t)((g_event_tail + 1U) % IPMS_EVENT_QUEUE_SIZE);
-    }
-
-    g_event_queue[g_event_head] = *event;
-    g_event_head = next_head;
+    (void)FrameQueue_Push(&g_event_queue, (void *)event);
 }
 
 /* Must be called with IPMS critical section held. */
@@ -337,8 +328,11 @@ IPMS_Status_t IPMS_Init(const IPMS_Config_t *config)
     IPMS_ResetContext();
     g_ipms.config = *config;
     g_ipms.initialized = true;
-    g_event_head = 0U;
-    g_event_tail = 0U;
+    FrameQueue_InitWithPolicy(&g_event_queue,
+                              (uint8_t *)g_event_queue_storage,
+                              (uint16_t)sizeof(IPMS_Event_t),
+                              IPMS_EVENT_QUEUE_SIZE,
+                              FRAME_QUEUE_DROP_OLDEST_ON_FULL);
     g_rtc_wakeup_seen = false;
     g_button_wakeup_seen = false;
     IPMS_ExitCritical(primask);
@@ -487,20 +481,19 @@ bool IPMS_PopEvent(IPMS_Event_t *event)
 {
     uint32_t primask;
 
-    if ((event == NULL) || (g_event_head == g_event_tail))
+    if ((event == NULL) || FrameQueue_IsEmpty(&g_event_queue))
     {
         return false;
     }
 
     primask = IPMS_EnterCritical();
-    if (g_event_head == g_event_tail)
+    if (FrameQueue_IsEmpty(&g_event_queue))
     {
         IPMS_ExitCritical(primask);
         return false;
     }
 
-    *event = g_event_queue[g_event_tail];
-    g_event_tail = (uint8_t)((g_event_tail + 1U) % IPMS_EVENT_QUEUE_SIZE);
+    (void)FrameQueue_Pop(&g_event_queue, event);
     IPMS_ExitCritical(primask);
     return true;
 }

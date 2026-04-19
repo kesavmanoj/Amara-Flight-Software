@@ -1,461 +1,776 @@
-# Phase 5 RTOS Architecture Plan
+# RTOS Architecture
 
-This document defines the target FreeRTOS architecture for the CubeSat Flight Computer Emulator and the migration path from the current mixed superloop / RTOS state.
+This document describes the firmware architecture that exists in the codebase today. It is not a phase plan and it is not a migration target. The goal here is to explain the current runtime clearly:
 
-The goal is not to "sprinkle tasks" onto the current firmware. The goal is to:
+- how boot hands off to FreeRTOS
+- which task owns which subsystem
+- which functions each task actually runs
+- what shared runtime state exists and why
+- how ISR callbacks hand work into the task world
+- how telemetry, command handling, power management, and storage interact
 
-- preserve the working module boundaries already built in earlier phases
-- move runtime ownership from the large superloop in [main.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/Core/Src/main.c) into real tasks
-- keep ISR work minimal
-- avoid hidden concurrency bugs
-- keep a clear validation path against the current firmware behavior
-
-## 1. Current Reality
-
-Right now the project is in a half-migrated state:
-
-- [main.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/Core/Src/main.c) contains the real application logic:
-  - command parsing
-  - telemetry processing
-  - G2S/radio polling
-  - ADC/IPMS sampling
-  - watchdog refresh
-  - periodic reporting
-  - low-power action execution
-- [freertos.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/Core/Src/freertos.c) creates placeholder tasks that mostly do nothing
-- `osKernelStart()` is called before the large `while(1)` loop in `main.c`
-
-That means the firmware is architecturally inconsistent:
-
-- the superloop contains the real behavior
-- the RTOS scheduler is also started
-
-Phase 5 fixes that by making FreeRTOS the actual runtime owner and simplifying `main.c` down to:
-
-- peripheral init
-- module init
-- RTOS init
-- scheduler start
-- HAL callback bridges only
-
-## 2. Design Principles
-
-The migration should follow these rules:
-
-- one subsystem should have one clear runtime owner
-- tasks should be grouped by responsibility, not by "whatever code was nearby"
-- ISRs should only capture/flag/notify
-- drivers that already own transport logic should keep that ownership
-- use queues, notifications, and mutexes only where they solve a real concurrency problem
-- prefer single-owner task models over multi-task shared mutation
-
-## 3. Final Task Model
-
-The target runtime should use four application tasks plus the FreeRTOS idle task.
-
-### 3.1 `CommTask`
-
-Purpose:
-
-- own command ingress and routing
-
-Responsibilities:
-
-- run `CommandParser_Process()` for UART CLI input
-- run `G2S_Link_Process()` for LoRa command ingress
-- own shared command dispatch timing and routing behavior
-- emit command-related telemetry events or ACKs through existing app APIs
-
-Why this grouping:
-
-- both UART CLI and G2S radio packets are command sources
-- the shared command path already exists in [Command_List.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/App/Src/Command_List.c)
-- grouping command ingress in one task avoids multi-task command execution races
-
-### 3.2 `TelemetryRadioTask`
-
-Purpose:
-
-- own telemetry transport scheduling and radio status housekeeping
-
-Responsibilities:
-
-- run `Telemetry_Process()`
-- schedule heartbeat and system status telemetry
-- publish telemetry stats periodically
-- perform periodic SX1278 status/version checks
-- own non-command radio housekeeping if still needed in polling mode
-
-Why this grouping:
-
-- telemetry and radio transport are both outbound observability/communications concerns
-- the current superloop already couples telemetry timing and radio reporting
-
-### 3.3 `HealthPowerTask`
-
-Purpose:
-
-- own sensor-health sampling and IPMS policy decisions
-
-Responsibilities:
-
-- periodically consume ADC monitor snapshots
-- update cached health state
-- call `IPMS_ProcessBatterySample()`
-- queue ADC health telemetry/events
-- handle power-related status reporting
-- request low-power actions when IPMS arms them
-
-Why this grouping:
-
-- ADC health and IPMS are already tightly related
-- battery-driven decisions should come from one place, not several tasks
-
-### 3.4 `StorageLogTask`
-
-Purpose:
-
-- own persistent logging and SD/FatFs interactions
-
-Responsibilities:
-
-- mount/unmount the SD card
-- perform file creation/open/append/sync/rotation
-- drain buffered log/storage requests from a queue
-- report SD status and storage failures
-
-Why this grouping:
-
-- FatFs becomes much safer if one task owns all file I/O
-- this avoids random file access from command handlers, telemetry paths, or health logic
-
-## 4. Recommended Priorities
-
-Use a simple and explainable priority model first.
-
-Recommended initial priorities:
-
-- `HealthPowerTask`: `AboveNormal`
-- `CommTask`: `Normal`
-- `TelemetryRadioTask`: `Normal`
-- `StorageLogTask`: `BelowNormal`
-
-Rationale:
-
-- health/power decisions affect watchdog safety and low-power entry, so they should not starve
-- command and telemetry work are important but not hard real-time in the current design
-- SD logging is the most likely to block and should be lower priority
-
-Do not add more priorities unless measurements show a real need.
-
-## 5. Timer / Wake Strategy
-
-Do not create a separate FreeRTOS software timer for every periodic action immediately.
-
-For the first migration:
-
-- use `vTaskDelayUntil()` in each task for deterministic periodic work
-- reserve notifications for event-driven wakeups
-
-Recommended cadences based on current `main.c` behavior:
-
-- `CommTask`: short loop, e.g. `5-10 ms`
-- `HealthPowerTask`: `1000 ms`
-- `TelemetryRadioTask`:
-  - heartbeat/status scheduling internally at `2000/3000/4000 ms`
-  - short service loop for `Telemetry_Process()`
-- `StorageLogTask`: event-driven with periodic flush, e.g. `250-1000 ms`
-
-## 6. ISR-To-Task Handoff Model
-
-Keep ISR work minimal.
-
-### UART RX ISR
-
-Current behavior to preserve:
-
-- RX complete callback pushes one byte into the UART RX ring buffer
-- re-arms `HAL_UART_Receive_IT()`
-
-Phase 5 behavior:
-
-- keep that in the UART driver
-- optionally notify `CommTask` that new RX data is available
-
-### UART TX Complete / Error ISR
-
-Current behavior to preserve:
-
-- remain inside [UART_Driver.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/Hardware/Src/UART_Driver.c)
-- do not move UART DMA state handling into tasks
-
-### ADC DMA Complete ISR
-
-Current behavior to preserve:
-
-- callback updates the latest ADC snapshot in `ADC_Monitor`
-
-Phase 5 behavior:
-
-- keep callback short
-- optionally notify `HealthPowerTask` that fresh ADC data is available
-
-### RTC Wakeup ISR
-
-Current behavior to preserve:
-
-- callback only records that RTC wake occurred through IPMS
-
-### GPIO EXTI Button ISR
-
-Current behavior to preserve:
-
-- callback only records button wake through IPMS
-
-## 7. Synchronization Plan
-
-Synchronization should be deliberate and minimal.
-
-### 7.1 Logger
-
-Current issue:
-
-- any task could eventually call `Logger_Info()` / `Logger_Warn()` / `Logger_Error()`
-
-Plan:
-
-- add one logger/output mutex around formatting + console write submission
-- keep the UART driver as the transport owner underneath
-
-Alternative future improvement:
-
-- convert logger into a message queue + dedicated log consumer task
-
-For first migration, a mutex is enough.
-
-### 7.2 UART Driver
-
-Current strength:
-
-- already protects ISR/shared TX state internally
-
-Plan:
-
-- keep UART transport ownership in the driver
-- allow multi-task callers only if logger/command/telemetry ownership rules are clear
-- avoid adding a separate UART mutex unless measurements show a need
-
-### 7.3 Telemetry
-
-Current issue:
-
-- several modules can enqueue telemetry packets
-
-Plan:
-
-- keep frame queue ownership in [Telemetry.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/App/Src/Telemetry.c)
-- add a telemetry mutex only if multiple tasks directly enqueue and races show up
-- preferred design is to let `TelemetryRadioTask` own `Telemetry_Process()` while other tasks only enqueue packets
-
-### 7.4 Storage / FatFs
-
-Plan:
-
-- one task should own all filesystem access
-- no direct FatFs calls from command handlers or health logic once migrated
-- command handlers should enqueue storage requests instead of touching files directly
-
-This is the most important single-owner rule in the whole RTOS migration.
-
-## 8. Watchdog Strategy
-
-Do not let every task refresh the watchdog independently.
-
-Target strategy:
-
-- each critical task updates a heartbeat counter or timestamp
-- one watchdog owner checks that all required tasks are making progress
-- only then refresh `IWDG`
-
-Recommended watchdog owner:
-
-- `HealthPowerTask`
-
-Why:
-
-- it already wakes periodically
-- it is semantically close to system health supervision
-
-Required heartbeats:
-
-- `CommTask`
-- `TelemetryRadioTask`
-- `HealthPowerTask`
-- `StorageLogTask` when storage is enabled
-
-If any required task stalls beyond its allowed window:
-
-- watchdog refresh is withheld
-- reset becomes meaningful rather than cosmetic
-
-## 9. What Moves Out Of `main.c`
-
-The following runtime work should leave `main.c` during Phase 5:
-
-- `CommandParser_Process()`
-- `Telemetry_Process()`
-- `G2S_Link_Process()`
-- periodic heartbeat LED logic
-- periodic ADC/IPMS sampling
-- periodic telemetry queue/report logic
-- periodic radio status logging
-- low-power action polling and execution trigger
-
-What should stay in `main.c`:
-
-- HAL / CubeMX init
-- module init
-- task creation
-- scheduler start
-- HAL callback forwarding functions
-- `SystemClock_Config()`
-- `Error_Handler()`
-
-## 10. Migration Slices
-
-Do not migrate everything in one patch.
-
-### Slice 1: Freeze The Reference Behavior
-
-Before moving any runtime logic:
-
-- document the exact periodic behaviors currently implemented in `main.c`
-- use that as the regression checklist
-
-Reference timings from current code:
-
-- LED heartbeat: `500 ms`
-- ADC/IPMS sample: `1000 ms`
-- system status telemetry queue: `2000 ms`
-- telemetry stats report: `3000 ms`
-- radio status report: `4000 ms`
-- ADC health report: `5000 ms`
-
-### Slice 2: Build The Real Task Skeleton
-
-Rewrite [freertos.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/Core/Src/freertos.c) so the task names and responsibilities match the final model:
+The key architectural idea is that `main()` performs one-time board bring-up, then FreeRTOS becomes the runtime owner. Periodic behavior is no longer driven from the `while(1)` loop in `main.c`; it is driven by four application tasks:
 
 - `CommTask`
 - `TelemetryRadioTask`
 - `HealthPowerTask`
 - `StorageLogTask`
 
-At this stage, leave `main.c` superloop active only if scheduler start is disabled for the transition branch.
+## 1. System Overview
 
-### Slice 3: Migrate `HealthPowerTask`
+At a high level, the current firmware is split into five layers:
 
-Move into the task:
+### 1.1 Boot / HAL layer
 
-- ADC sample polling
-- runtime ADC cache updates
-- `IPMS_ProcessBatterySample()`
-- periodic ADC report/event logic
-- watchdog supervision start
+CubeMX-generated peripheral init and HAL callback entrypoints live mostly in:
 
-Why first:
+- [main.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/Core/Src/main.c)
 
-- smallest ownership boundary
-- lowest coupling to CLI and storage
+This layer is responsible for:
 
-### Slice 4: Migrate `TelemetryRadioTask`
+- MCU reset and HAL startup
+- clock configuration
+- peripheral init
+- creation of the FreeRTOS runtime
+- forwarding HAL callbacks into project-owned modules
 
-Move into the task:
+### 1.2 Runtime resource layer
 
-- `Telemetry_Process()`
-- periodic system status queueing
-- heartbeat queueing
-- telemetry stats logging
-- radio version/status reporting
+Runtime-owned handles and configuration structs are centralized in:
 
-### Slice 5: Migrate `CommTask`
+- [Runtime_Resources.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/App/Src/Runtime_Resources.c)
+- [Runtime_Resources.h](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/App/Inc/Runtime_Resources.h)
 
-Move into the task:
+This layer provides one shared place to hold:
+
+- `I2C_Bus_Handle_t`
+- `OLED_HandleTypeDef`
+- `SX1278_Handle_t`
+- `G2S_Link_Handle_t`
+- `IPMS_Config_t`
+- `SystemRuntimeContext_t`
+- `SystemRuntimeHooks_t`
+
+It exists so tasks and runtime helpers can access the same project-owned objects without making `main.c` the permanent owner of everything.
+
+### 1.3 Runtime shared-state layer
+
+Small pieces of cross-task runtime state live in:
+
+- [Runtime_State.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/App/Src/Runtime_State.c)
+- [Runtime_State.h](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/App/Inc/Runtime_State.h)
+
+This layer holds only the shared values that really need to survive across task boundaries, such as:
+
+- latest cached ADC sample
+- telemetry UART completion/error counters
+- queued IPMS control requests from command handling into the health task
+
+This is intentionally small. It is not meant to be a giant dumping ground for globals.
+
+### 1.4 Service / subsystem layer
+
+The application modules implement the actual system behaviors:
+
+- [Telemetry.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/App/Src/Telemetry.c)
+- [Command_Parser.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/App/Src/Command_Parser.c)
+- [Command_List.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/App/Src/Command_List.c)
+- [G2S_Link.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/App/Src/G2S_Link.c)
+- [IPMS.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/App/Src/IPMS.c)
+- [Storage_Service.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/App/Src/Storage_Service.c)
+- [System_Runtime.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/App/Src/System_Runtime.c)
+- hardware-facing drivers such as `UART_Driver`, `ADC_Monitor`, `I2C_Bus`, `SX1278`
+
+These modules own the logic of each subsystem. The FreeRTOS tasks decide when to call them.
+
+### 1.5 Task ownership layer
+
+FreeRTOS task creation and scheduling live in:
+
+- [freertos.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/Core/Src/freertos.c)
+
+This file is the runtime ownership map. It decides:
+
+- which task exists
+- what each task runs
+- how often each task runs
+- how watchdog supervision works
+
+## 2. Boot And Scheduler Handoff
+
+The current boot sequence is defined in [main.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/Core/Src/main.c).
+
+### 2.1 `main()` responsibilities
+
+`main()` does the following in order:
+
+1. `HAL_Init()`
+2. `SystemClock_Config()`
+3. initialize all configured peripherals:
+   - GPIO
+   - DMA
+   - SDIO
+   - UART1 / UART2
+   - I2C1
+   - SPI1
+   - ADC1
+   - TIM2
+   - CRC
+   - IWDG
+   - RTC
+   - FatFs
+4. initialize runtime resource storage with `RuntimeResources_Init()`
+5. fetch resource pointers from the runtime resource layer
+6. populate `SystemRuntimeHooks_t` so stop-mode restore code knows which Cube init functions to call later
+7. initialize runtime shared state with `RuntimeState_Init()`
+8. initialize project modules:
+   - UART driver for console and telemetry channels
+   - command parser
+   - ADC monitor
+   - telemetry
+   - IPMS config + IPMS engine
+   - SX1278 radio
+   - G2S link
+   - I2C bus and OLED
+9. fill `SystemRuntimeContext_t` with HAL handles and subsystem handles
+10. emit startup logs and boot telemetry
+11. call `osKernelInitialize()`
+12. call `MX_FREERTOS_Init()`
+13. call `osKernelStart()`
+
+After `osKernelStart()`, the firmware is under scheduler control. The `while(1)` loop remains only as a safety fallback and is not supposed to own runtime behavior.
+
+### 2.2 Why `SystemRuntimeHooks_t` exists
+
+The stop-mode restore path in [System_Runtime.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/App/Src/System_Runtime.c) needs to call Cube-generated init functions again after STOP mode, such as:
+
+- `SystemClock_Config`
+- `MX_DMA_Init`
+- `MX_USART1_UART_Init`
+- `MX_USART2_UART_Init`
+- `MX_I2C1_Init`
+- `MX_SPI1_Init`
+- `MX_ADC1_Init`
+- `MX_CRC_Init`
+
+Rather than hardcoding those calls directly inside `System_Runtime.c`, `main()` passes those function pointers through `SystemRuntimeHooks_t`. That keeps the restore logic decoupled from direct file-level dependencies on `main.c`.
+
+## 3. FreeRTOS Task Model
+
+The active application tasks are all created in [freertos.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/Core/Src/freertos.c) by `MX_FREERTOS_Init()`.
+
+### 3.1 `MX_FREERTOS_Init()`
+
+This function creates the scheduler-owned runtime objects:
+
+- initializes the storage service with `StorageService_Init()`
+- resets task heartbeat supervision with `RTOS_ResetTaskHeartbeats(HAL_GetTick())`
+- creates:
+  - `ConsoleMutex`
+  - `StorageMutex`
+- creates the four worker tasks:
+  - `CommTask`
+  - `TelemetryRadioTask`
+  - `HealthPowerTask`
+  - `StorageLogTask`
+
+The task priorities are:
+
+- `HealthPowerTask`: `osPriorityAboveNormal`
+- `CommTask`: `osPriorityNormal`
+- `TelemetryRadioTask`: `osPriorityNormal`
+- `StorageLogTask`: `osPriorityBelowNormal`
+
+This priority split reflects the current architecture:
+
+- power and watchdog supervision should not starve
+- communications should stay responsive
+- storage is intentionally lower-priority because it can block on SD/FatFs work
+
+## 4. Task Ownership In Detail
+
+### 4.1 `CommTask`
+
+Entrypoint:
+
+- `StartCommTask()`
+
+Loop behavior:
+
+- marks its heartbeat with `RTOS_MarkTaskAlive(RTOS_TASK_ID_COMM)`
+- blocks on `osThreadFlagsWait(RTOS_COMM_WAKE_FLAG, osFlagsWaitAny, RTOS_COMM_POLL_PERIOD_MS)`
+- runs `RTOS_RunCommTaskCycle()`
+
+Important constants:
+
+- `RTOS_COMM_WAKE_FLAG = 0x00000001U`
+- `RTOS_COMM_POLL_PERIOD_MS = 5U`
+
+That means `CommTask` is mostly event-driven by UART RX wakeups, but it still polls at a short interval so transport progress never stalls forever.
+
+#### What `RTOS_RunCommTaskCycle()` does
+
+This helper is the task’s actual ownership boundary.
+
+It calls:
 
 - `CommandParser_Process()`
-- `G2S_Link_Process()`
-- command-centric reporting
+- `G2S_Link_Process(g2s_link)`
+- `Telemetry_ProcessStep(g2s_link)`
 
-### Slice 6: Migrate `StorageLogTask`
+So `CommTask` owns three things:
 
-Move into the task:
+1. console command ingress from UART CLI
+2. radio uplink processing from the G2S/LoRa path
+3. one step of outbound telemetry transport progress
 
-- SD mount/write/flush logic
-- future persistent logging service
+That third point is subtle and important. `TelemetryRadioTask` schedules telemetry production, but `CommTask` advances the transport state machine that actually sends queued frames.
 
-This slice should also replace any remaining direct FatFs access in command handlers with queue-driven requests.
+#### Why `CommTask` owns these functions
 
-### Slice 7: Remove Superloop Logic
+These three functions all belong to the communication/control side of the system:
 
-Once all behavior is task-owned:
+- `CommandParser_Process()` consumes bytes already captured by the UART driver
+- `G2S_Link_Process()` checks radio receive state and handles inbound packets
+- `Telemetry_ProcessStep()` advances one queued telemetry frame through radio/UART output
 
-- remove the large application body from `main.c`
-- keep only scheduler startup and callbacks
+So `CommTask` is both the command-ingress owner and the communication-progress owner.
 
-## 11. Shared State Cleanup
+### 4.2 `TelemetryRadioTask`
 
-These shared runtime values should be reduced or re-owned during migration:
+Entrypoint:
 
-- ADC cache state
-- telemetry ISR counters
-- radio reporting state
+- `StartTelemetryRadioTask()`
 
-Preferred end state:
+Loop behavior:
 
-- task-owned state where possible
-- shared state only when several tasks truly need read access
-- clearly documented ownership for each shared object
+- marks heartbeat with `RTOS_MarkTaskAlive(RTOS_TASK_ID_TELEMETRY)`
+- runs `RTOS_RunTelemetryRadioTaskCycle()`
+- delays with `vTaskDelayUntil(...)`
 
-## 12. Regression Checklist
+Task period constant:
 
-Phase 5 is not done until all pre-RTOS demos still work.
+- `RTOS_TELEMETRY_TASK_PERIOD_MS = 10U`
 
-Required regression checks:
+This task is not sending telemetry directly to hardware. It is the producer-side scheduler for recurring telemetry and radio reporting work.
 
-- CLI over `USART2` still works
-- logger output still appears on `USART2`
-- telemetry still transmits on `USART1`
-- ADC monitor still produces valid data
-- IPMS still transitions deterministically
-- sleep/stop wake path still restores runtime correctly
-- G2S command flow still works
-- SD smoke test still works once storage task is active
+#### What `RTOS_RunTelemetryRadioTaskCycle()` does
 
-## 13. Acceptance Criteria
+This helper keeps several periodic schedules using `HAL_GetTick()`:
 
-Phase 5 is complete when:
+- every `2000 ms`
+  - queue system status telemetry with `Telemetry_SendSystemStatusEx(...)`
+- every `3000 ms`
+  - queue a telemetry heartbeat with `Telemetry_SendHeartbeatEx(...)`
+  - snapshot telemetry stats via `Telemetry_GetStats(...)`
+  - snapshot logger stats via `Logger_GetStats(...)`
+  - snapshot runtime telemetry counters via `RuntimeState_GetTelemetryCounters(...)`
+  - log those stats to the console/logging path
+- every `4000 ms`
+  - read SX1278 version with `SX1278_ReadVersion(...)`
+  - snapshot G2S stats with `G2S_Link_GetStats(...)`
+  - log radio and link health
 
-- tasks have clear ownership and bounded responsibilities
-- `main.c` is no longer the hidden runtime owner
-- no placeholder RTOS tasks remain
-- no hidden concurrency exists on shared buffers or storage access
-- watchdog refresh reflects whole-system health
-- earlier phase demos still work after migration
+So `TelemetryRadioTask` owns:
 
-## 14. Deliverables
+- recurring telemetry production
+- observability/reporting cadence
+- periodic radio health reporting
 
-The expected Phase 5 deliverables should be:
+It does not directly call UART HAL or SX1278 SPI transmit for telemetry frames. It just queues telemetry packets and emits diagnostic logs.
 
-1. this architecture document
-2. rewritten [freertos.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/Core/Src/freertos.c) with real task ownership
-3. simplified [main.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/Core/Src/main.c)
-4. queue/mutex/task-notification additions only where justified
-5. updated testing docs for RTOS regression
+### 4.3 `HealthPowerTask`
 
-## 15. Recommended Immediate Next Step
+Entrypoint:
 
-Before any Phase 5 code changes:
+- `StartHealthPowerTask()`
 
-- create a small parity checklist from the current `main.c` superloop
-- then rewrite `freertos.c` task definitions to match the model in this document
+Loop behavior:
 
-That gives us a clean migration target without continuing the current half-RTOS / half-superloop state.
+- runs `RTOS_RunHealthPowerTaskCycle()`
+- delays with `vTaskDelayUntil(...)`
+
+Task period constant:
+
+- `RTOS_HEALTH_TASK_PERIOD_MS = 20U`
+
+This is the system health supervisor. It owns watchdog decisions, ADC/IPMS sampling cadence, power-management event reporting, and actual low-power action handoff.
+
+#### What `RTOS_RunHealthPowerTaskCycle()` does
+
+This function is the densest runtime helper in the system. It performs several separate jobs.
+
+##### 1. Task heartbeat and watchdog supervision
+
+It marks `HealthPowerTask` alive, then checks whether the system-wide watchdog may be refreshed:
+
+- `RTOS_WatchdogCanRefresh(now, &fault_mask)`
+
+If all required tasks are healthy, it refreshes the independent watchdog:
+
+- `HAL_IWDG_Refresh(&hiwdg)`
+
+If not, it withholds the refresh and logs which tasks are stale through:
+
+- `RTOS_LogWatchdogFaultMask(fault_mask)`
+
+The current supervision model checks:
+
+- `CommTask`
+- `TelemetryRadioTask`
+- `StorageLogTask`
+
+`HealthPowerTask` is the watchdog owner, so it supervises the others rather than requiring a separate task to do that.
+
+##### 2. IPMS event reporting
+
+It calls:
+
+- `SystemRuntime_ReportIpmsEvents()`
+
+That function drains the internal IPMS event queue and mirrors those events into:
+
+- logger output
+- telemetry event packets
+
+This makes the IPMS module internally queue-based, while the health task is the integration point that publishes those queued events outward.
+
+##### 3. Apply queued IPMS mode/policy control requests
+
+Commands do not directly mutate IPMS mode/policy state. Instead they enqueue control requests into `Runtime_State`.
+
+`HealthPowerTask` drains them with:
+
+- `RuntimeState_PopIpmsControlRequest(...)`
+
+and applies them through:
+
+- `IPMS_SetSimulationMode(...)`
+- `IPMS_SetPolicyMode(...)`
+
+This means the health task is the single owner of mutating IPMS control state.
+
+##### 4. Heartbeat LED
+
+Every `500 ms`, the task toggles:
+
+- `LD2_HEARTBEAT_Pin`
+
+So the visible heartbeat LED is owned here, not by `main.c`.
+
+##### 5. ADC sampling and IPMS state-machine feed
+
+Every `1000 ms`, the task:
+
+- reads ADC health through `ADC_Monitor_GetData(...)`
+- caches the latest valid sample into `RuntimeState_SetLatestAdcSample(...)`
+- feeds battery voltage into the IPMS state machine via `IPMS_ProcessBatterySample(...)`
+
+This is the critical bridge between ADC monitoring and power policy.
+
+##### 6. Periodic ADC health telemetry/reporting
+
+Every `5000 ms`, the task:
+
+- reads the latest cached ADC sample from `RuntimeState_GetLatestAdcSample(...)`
+- if valid:
+  - queues ADC health telemetry with `Telemetry_SendADCHealthEx(...)`
+  - logs measured voltages and temperature
+- if invalid:
+  - queues an ADC error telemetry event with `Telemetry_SendEventEx(...)`
+  - logs a warning
+
+So health telemetry is scheduled from here, not from the ADC driver itself.
+
+##### 7. Execute pending low-power actions
+
+If IPMS arms a low-power action, the task checks:
+
+- `IPMS_GetPendingAction(&power_action)`
+
+If one exists, it hands that action to:
+
+- `SystemRuntime_ExecuteIpmsAction(...)`
+
+using:
+
+- `RuntimeResources_GetSystemRuntimeContext()`
+- `RuntimeResources_GetSystemRuntimeHooks()`
+
+After low-power entry/restore completes, the task resets heartbeat supervision with:
+
+- `RTOS_ResetTaskHeartbeats(HAL_GetTick())`
+
+That reset is important because entering STOP mode naturally creates a time gap that would otherwise look like task starvation to the watchdog supervision logic.
+
+### 4.4 `StorageLogTask`
+
+Entrypoint:
+
+- `StartStorageLogTask()`
+
+Loop behavior:
+
+- marks heartbeat with `RTOS_MarkTaskAlive(RTOS_TASK_ID_STORAGE)`
+- repeatedly calls `StorageService_ProcessNext(250U)`
+
+This task is the single owner of SD/FatFs execution.
+
+#### What `StorageService_ProcessNext(250U)` means architecturally
+
+This one call hides the whole storage service runtime.
+
+`StorageService_ProcessNext(...)` does three things in priority order:
+
+1. service one explicit storage request if one is waiting
+   - SD status
+   - smoke test
+2. otherwise service one queued log record
+3. even if idle, evaluate whether buffered file data should be flushed
+
+So `StorageLogTask` owns:
+
+- command-driven SD request execution
+- queued persistent logging
+- mount/open/append/sync/rotation policy
+
+No other task should be touching FatFs directly in the current architecture.
+
+## 5. Shared Runtime Helpers
+
+### 5.1 `RuntimeResources`
+
+This module is simple but important. It stores the shared subsystem objects that are allocated once during boot and then reused everywhere else.
+
+Examples:
+
+- `CommTask` gets the G2S link handle from `RuntimeResources_GetG2SLink()`
+- telemetry/radio reporting gets the radio and link handles from `RuntimeResources`
+- `HealthPowerTask` gets `SystemRuntimeContext_t` and `SystemRuntimeHooks_t` from `RuntimeResources`
+
+The point is to let tasks fetch stable subsystem objects without passing giant parameter bundles through every task entrypoint.
+
+### 5.2 `RuntimeState`
+
+This module holds the small amount of truly shared mutable runtime state:
+
+- latest ADC sample
+- telemetry TX complete/error counters
+- queued IPMS control requests
+
+It uses interrupt masking rather than RTOS mutexes for these tiny snapshots/counters because:
+
+- some updates come from callbacks
+- the data structures are small
+- the access patterns are short
+
+The current IPMS control request queue is implemented using the shared `FrameQueue_t` abstraction with `FRAME_QUEUE_FAIL_ON_FULL`, so command handlers can enqueue mode/policy changes and the health task can drain them safely.
+
+## 6. ISR And Callback Handoff Model
+
+The callback model in [main.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/Core/Src/main.c) is intentionally minimal.
+
+### 6.1 UART RX complete callback
+
+Function:
+
+- `HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)`
+
+It does two things:
+
+1. forwards into the UART driver:
+   - `UART_RxCpltCallback(huart)`
+2. wakes the communication task:
+   - `RTOS_NotifyCommTaskRxFromISR()`
+
+So ISR work is:
+
+- capture byte into UART driver state
+- notify `CommTask`
+
+`CommTask` later does the heavier work by running `CommandParser_Process()`.
+
+### 6.2 ADC conversion complete callback
+
+Function:
+
+- `HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)`
+
+It forwards to:
+
+- `ADC_Monitor_ConvCpltCallback(hadc)`
+
+So the ISR updates ADC-monitor-owned conversion state, while `HealthPowerTask` later reads that processed state and turns it into runtime decisions.
+
+### 6.3 UART TX complete callback
+
+Function:
+
+- `HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)`
+
+If this is the telemetry UART (`huart1`), it records runtime telemetry counters through:
+
+- `RuntimeState_RecordTelemetryTxComplete()`
+
+Then it forwards into the UART driver:
+
+- `UART_TxCpltCallback(huart)`
+
+So the callback both feeds observability counters and advances UART driver DMA state.
+
+### 6.4 UART error callback
+
+Function:
+
+- `HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)`
+
+If this is telemetry UART, it records:
+
+- `RuntimeState_RecordTelemetryError()`
+
+Then forwards to:
+
+- `UART_ErrorCallback(huart)`
+
+### 6.5 RTC wakeup callback
+
+Function:
+
+- `HAL_RTCEx_WakeUpTimerEventCallback(...)`
+
+It simply calls:
+
+- `IPMS_OnRtcWakeup()`
+
+That means the callback records the wake source, but does not attempt to restore the whole runtime on the spot.
+
+### 6.6 Button EXTI callback
+
+Function:
+
+- `HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)`
+
+When the user button pin matches, it calls:
+
+- `IPMS_OnButtonWakeup()`
+
+Again, callback work is intentionally tiny: just mark the wake source.
+
+## 7. Communication Architecture
+
+The current communications architecture is split across command ingress and telemetry egress.
+
+### 7.1 UART roles
+
+- `USART2` is the CLI/logger console channel
+- `USART1` is the telemetry UART channel
+
+The UART driver owns:
+
+- interrupt-driven RX buffering
+- DMA-backed TX progression
+
+Tasks do not manipulate HAL UART state directly.
+
+### 7.2 Command ingress
+
+There are two command sources:
+
+- UART CLI bytes captured by the UART driver and parsed by `CommandParser_Process()`
+- LoRa/G2S packets processed by `G2S_Link_Process()`
+
+Both command sources converge on command-dispatch logic in the command modules.
+
+Mode/policy changes that affect IPMS are not applied directly in the command path; they are queued through `RuntimeState_QueueIpmsControlRequest(...)` and later applied by `HealthPowerTask`.
+
+### 7.3 Telemetry egress
+
+Telemetry has two conceptual parts:
+
+1. producers
+   - system status
+   - heartbeat
+   - ADC health
+   - event packets
+   - command ACK packets
+2. transport owner
+   - `Telemetry_ProcessStep()`
+
+Most tasks only queue telemetry packets. `CommTask` is the task that repeatedly calls `Telemetry_ProcessStep()` and therefore owns actual frame-progress through radio/UART downlink.
+
+The current default downlink mode configured in `main()` is:
+
+- `TELEM_DOWNLINK_RADIO_WITH_UART_MIRROR`
+
+So telemetry tries to use radio as the primary path while also mirroring to the telemetry UART.
+
+## 8. Power-Management Architecture
+
+The power-management path is split between decision logic and execution logic.
+
+### 8.1 Decision layer: `IPMS`
+
+`IPMS.c` owns:
+
+- battery-state evaluation
+- power-state transitions
+- low-power action arming
+- IPMS event generation
+
+It does not directly enter sleep or stop mode.
+
+### 8.2 Integration layer: `HealthPowerTask`
+
+`HealthPowerTask` owns:
+
+- feeding ADC battery samples into IPMS
+- draining queued IPMS control requests
+- draining and reporting queued IPMS events
+- checking whether IPMS has armed an action
+
+### 8.3 Execution layer: `System_Runtime`
+
+`SystemRuntime_ExecuteIpmsAction(...)` in [System_Runtime.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/App/Src/System_Runtime.c) turns an IPMS action into actual MCU behavior.
+
+That function is responsible for:
+
+- arming RTC wakeup through `IPMS_ArmRtcWakeup(...)`
+- preparing peripherals for low power
+- entering `HAL_PWR_EnterSLEEPMode(...)` or `HAL_PWR_EnterSTOPMode(...)`
+- recording wakeup with `IPMS_RecordWakeup(...)`
+- doing minimal or full restore depending on context
+- re-sampling ADC/IPMS after STOP wake to determine whether another low-power chunk is needed
+
+So the current architecture is intentionally layered:
+
+- IPMS decides
+- health task supervises and triggers
+- system runtime executes HAL low-power entry/restore
+
+## 9. Storage Architecture
+
+Storage is designed as a single-owner task model.
+
+### 9.1 Producer side
+
+Producers do not call FatFs directly.
+
+Examples:
+
+- `Logger` queues log lines via `StorageService_EnqueueLogLine(...)`
+- command handlers request SD status or smoke tests via `StorageService_RequestSdStatus(...)` and `StorageService_RequestSmokeTest(...)`
+
+### 9.2 Owner side
+
+`StorageLogTask` owns:
+
+- command queue draining
+- log queue draining
+- SD detect/init/mount behavior
+- active log file open/append/flush/rotate behavior
+
+So the architecture is:
+
+- producers enqueue or request
+- `StorageLogTask` performs actual media and filesystem work
+
+That prevents multiple tasks from racing through FatFs.
+
+## 10. Watchdog Supervision
+
+The watchdog strategy is centralized in `HealthPowerTask`.
+
+The helper functions are:
+
+- `RTOS_MarkTaskAlive(...)`
+- `RTOS_ResetTaskHeartbeats(...)`
+- `RTOS_WatchdogCanRefresh(...)`
+- `RTOS_LogWatchdogFaultMask(...)`
+
+The supervision model is timestamp-based:
+
+- each key task updates its last alive time
+- `HealthPowerTask` checks whether they have updated recently enough
+- only then does it refresh `IWDG`
+
+Timeouts currently used:
+
+- `CommTask`: `250 ms`
+- `TelemetryRadioTask`: `250 ms`
+- `StorageLogTask`: `1000 ms`
+
+There is also a startup grace window:
+
+- `RTOS_WATCHDOG_STARTUP_GRACE_MS = 3000U`
+
+This means the watchdog is intended to reflect real system liveness, not just cosmetic periodic refreshes.
+
+## 11. Mutexes And Synchronization
+
+The current architecture uses a light synchronization strategy.
+
+### `ConsoleMutex`
+
+Created in `MX_FREERTOS_Init()`, used by the logger to serialize console/log formatting and output submission.
+
+### `StorageMutex`
+
+Created in `MX_FREERTOS_Init()`.
+
+In the current architecture, the stronger protection model for storage is task ownership rather than widespread external locking. The single-owner `StorageLogTask` model is the main protection against storage concurrency.
+
+### Critical sections in shared-state modules
+
+Modules like `Runtime_State`, `Telemetry`, and `IPMS` use short interrupt-masking critical sections around:
+
+- tiny counters
+- queue operations
+- snapshot copies
+
+That keeps shared state small and local rather than turning everything into mutex-heavy RTOS code.
+
+## 12. Current Reading Guide
+
+If you want to understand the runtime in code order, the best reading sequence is:
+
+1. [main.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/Core/Src/main.c)
+   Boot, module init, callbacks, scheduler handoff.
+
+2. [freertos.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/Core/Src/freertos.c)
+   Task creation, task entrypoints, watchdog supervision, per-task runtime-cycle helpers.
+
+3. [Runtime_Resources.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/App/Src/Runtime_Resources.c)
+   Shared resource object ownership.
+
+4. [Runtime_State.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/App/Src/Runtime_State.c)
+   Small cross-task shared state and queues.
+
+5. [Telemetry.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/App/Src/Telemetry.c)
+   Telemetry frame queueing and transport state machine.
+
+6. [G2S_Link.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/App/Src/G2S_Link.c) and [Command_Parser.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/App/Src/Command_Parser.c)
+   Command ingress from radio and UART.
+
+7. [IPMS.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/App/Src/IPMS.c)
+   Battery/power state machine and action arming.
+
+8. [System_Runtime.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/App/Src/System_Runtime.c)
+   Low-power execution and restore integration.
+
+9. [Storage_Service.c](C:/Users/KESAV/projects/Amara-Flight-Software/amara-flight-software2.0/App/Src/Storage_Service.c)
+   Single-owner storage runtime.
+
+## 13. Summary
+
+The current architecture is a task-owned FreeRTOS runtime with clear subsystem ownership:
+
+- `main()` boots and binds resources
+- `freertos.c` creates tasks and defines ownership
+- `CommTask` owns command ingress and communication progress
+- `TelemetryRadioTask` owns recurring telemetry/radio production and reporting
+- `HealthPowerTask` owns watchdog, ADC/IPMS, health reporting, and low-power trigger logic
+- `StorageLogTask` owns all SD/FatFs execution
+- `System_Runtime` bridges IPMS actions into HAL low-power behavior
+- HAL callbacks remain minimal and only hand work into subsystem or task-owned state
+
+That is the architecture the rest of the project now builds on.

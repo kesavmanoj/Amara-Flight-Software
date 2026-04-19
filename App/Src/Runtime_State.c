@@ -6,6 +6,7 @@
  */
 
 #include "Runtime_State.h"
+#include "Ring_Buffer.h"
 #include <string.h>
 
 #define RUNTIME_IPMS_CONTROL_QUEUE_SIZE 8U
@@ -15,9 +16,8 @@ typedef struct {
     bool latest_adc_valid;
     uint32_t telem_tx_complete_count;
     uint32_t telem_error_count;
-    RuntimeIpmsControlRequest_t ipms_control_queue[RUNTIME_IPMS_CONTROL_QUEUE_SIZE];
-    uint8_t ipms_control_head;
-    uint8_t ipms_control_tail;
+    RuntimeIpmsControlRequest_t ipms_control_queue_storage[RUNTIME_IPMS_CONTROL_QUEUE_SIZE];
+    FrameQueue_t ipms_control_queue;
 } RuntimeState_Data_t;
 
 static RuntimeState_Data_t g_runtime_state;
@@ -41,6 +41,11 @@ void RuntimeState_Init(void)
 {
     uint32_t primask = RuntimeState_EnterCritical();
     memset(&g_runtime_state, 0, sizeof(g_runtime_state));
+    FrameQueue_InitWithPolicy(&g_runtime_state.ipms_control_queue,
+                              (uint8_t *)g_runtime_state.ipms_control_queue_storage,
+                              (uint16_t)sizeof(RuntimeIpmsControlRequest_t),
+                              RUNTIME_IPMS_CONTROL_QUEUE_SIZE,
+                              FRAME_QUEUE_FAIL_ON_FULL);
     RuntimeState_ExitCritical(primask);
 }
 
@@ -119,8 +124,7 @@ void RuntimeState_InvalidateLatestAdcSample(void)
 bool RuntimeState_QueueIpmsControlRequest(RuntimeIpmsControlType_t type, uint32_t value, uint32_t timestamp_ms)
 {
     uint32_t primask;
-    uint8_t next_head;
-    RuntimeIpmsControlRequest_t *slot;
+    RuntimeIpmsControlRequest_t request;
 
     if ((type != RUNTIME_IPMS_CONTROL_SET_SIMULATION_MODE) &&
         (type != RUNTIME_IPMS_CONTROL_SET_POLICY_MODE))
@@ -128,19 +132,16 @@ bool RuntimeState_QueueIpmsControlRequest(RuntimeIpmsControlType_t type, uint32_
         return false;
     }
 
+    request.type = type;
+    request.value = value;
+    request.timestamp_ms = timestamp_ms;
+
     primask = RuntimeState_EnterCritical();
-    next_head = (uint8_t)((g_runtime_state.ipms_control_head + 1U) % RUNTIME_IPMS_CONTROL_QUEUE_SIZE);
-    if (next_head == g_runtime_state.ipms_control_tail)
+    if (!FrameQueue_Push(&g_runtime_state.ipms_control_queue, &request))
     {
         RuntimeState_ExitCritical(primask);
         return false;
     }
-
-    slot = &g_runtime_state.ipms_control_queue[g_runtime_state.ipms_control_head];
-    slot->type = type;
-    slot->value = value;
-    slot->timestamp_ms = timestamp_ms;
-    g_runtime_state.ipms_control_head = next_head;
     RuntimeState_ExitCritical(primask);
 
     return true;
@@ -157,11 +158,9 @@ bool RuntimeState_PopIpmsControlRequest(RuntimeIpmsControlRequest_t *request)
     }
 
     primask = RuntimeState_EnterCritical();
-    if (g_runtime_state.ipms_control_head != g_runtime_state.ipms_control_tail)
+    if (!FrameQueue_IsEmpty(&g_runtime_state.ipms_control_queue))
     {
-        *request = g_runtime_state.ipms_control_queue[g_runtime_state.ipms_control_tail];
-        g_runtime_state.ipms_control_tail =
-                (uint8_t)((g_runtime_state.ipms_control_tail + 1U) % RUNTIME_IPMS_CONTROL_QUEUE_SIZE);
+        (void)FrameQueue_Pop(&g_runtime_state.ipms_control_queue, request);
         has_request = true;
     }
     RuntimeState_ExitCritical(primask);

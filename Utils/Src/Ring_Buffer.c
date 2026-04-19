@@ -107,10 +107,19 @@ static inline uint16_t fq_next(FrameQueue_t *fq, uint16_t index){
 }
 
 void FrameQueue_Init(FrameQueue_t *fq, uint8_t *buffer, uint16_t element_size, uint16_t capacity){
+	FrameQueue_InitWithPolicy(fq, buffer, element_size, capacity, FRAME_QUEUE_FAIL_ON_FULL);
+}
+
+void FrameQueue_InitWithPolicy(FrameQueue_t *fq,
+		uint8_t *buffer,
+		uint16_t element_size,
+		uint16_t capacity,
+		FrameQueueFullPolicy_t full_policy){
 
 	fq -> buffer = buffer;
 	fq -> element_size = element_size;
 	fq -> capacity = capacity;
+	fq -> full_policy = full_policy;
 	fq -> head = 0;
 	fq -> tail = 0;
 
@@ -132,7 +141,14 @@ bool FrameQueue_Push(FrameQueue_t *fq, void *item){
 
 	uint16_t next = fq_next(fq, fq -> head);
 
-	if(next == fq -> tail) return false;
+	if(next == fq -> tail){
+		if(fq -> full_policy == FRAME_QUEUE_DROP_OLDEST_ON_FULL){
+			fq -> tail = fq_next(fq, fq -> tail);
+		}
+		else{
+			return false;
+		}
+	}
 
 	uint8_t *dest = fq -> buffer + (fq -> head * fq -> element_size);
 	memcpy(dest, item, fq -> element_size);
