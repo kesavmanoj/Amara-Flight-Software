@@ -63,9 +63,11 @@ bool RingBuffer_Pop(RingBuffer_t *rb, uint8_t *data){
 bool RingBuffer_PushArray(RingBuffer_t *rb, uint8_t *data, uint16_t len){
 
 	if((rb == NULL) || (data == NULL)) return false;
-	if((uint16_t)(RING_BUFFER_SIZE - 1U - RingBuffer_Available(rb)) < len) return false;
 
-	for(uint16_t i = 0; i < len; i++){
+	// checks if there is enough space in the ring buffer for an array of length 'len'
+	if((uint16_t)(RING_BUFFER_SIZE - 1U - RingBuffer_Available(rb)) < len) return false; 
+
+	for(uint16_t i = 0; i < len; i++){ // pushes elements in array one by one into ringbuffer
 		if(!RingBuffer_Push(rb, data[i])) return false;
 	}
 
@@ -78,6 +80,8 @@ uint16_t RingBuffer_PopArray(RingBuffer_t *rb, uint8_t *data, uint16_t max_len){
 	if((rb == NULL) || (data == NULL)) return 0;
 
 	uint16_t count = 0;
+
+	// continues getting elements from ringbuffer until either 'count' reaches 'max_len' or ringbuffer is empty
 
 	while(count < max_len && !RingBuffer_IsEmpty(rb)){
 		data[count++] = rb -> buffer[rb -> tail];
@@ -92,7 +96,7 @@ uint16_t RingBuffer_Available(RingBuffer_t *rb)
     if (rb->head >= rb->tail)
     {
         return (rb->head - rb->tail);
-    }
+    } 
     else
     {
         return (RING_BUFFER_SIZE - rb->tail + rb->head);
@@ -142,14 +146,15 @@ bool FrameQueue_Push(FrameQueue_t *fq, void *item){
 	uint16_t next = fq_next(fq, fq -> head);
 
 	if(next == fq -> tail){
-		if(fq -> full_policy == FRAME_QUEUE_DROP_OLDEST_ON_FULL){
+		// If queue is full then either drops the oldest element or returns false depending on the 'full policy'
+		if(fq -> full_policy == FRAME_QUEUE_DROP_OLDEST_ON_FULL){ 
 			fq -> tail = fq_next(fq, fq -> tail);
 		}
 		else{
 			return false;
 		}
 	}
-
+	// calculate address of where to begin pushing the frame
 	uint8_t *dest = fq -> buffer + (fq -> head * fq -> element_size);
 	memcpy(dest, item, fq -> element_size);
 

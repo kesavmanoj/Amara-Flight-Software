@@ -46,6 +46,7 @@ I2C_Status_t I2C_Bus_Init(I2C_Bus_Handle_t *bus, I2C_HandleTypeDef *hi2c){
 	return I2C_OK;
 }
 
+//  probe every possible 7-bit I2C address on the bus and log which addresses respond
 void I2C_Bus_Scan(I2C_Bus_Handle_t *bus){
 	if(I2C_Bus_ValidateHandle(bus) != I2C_OK){
 		Logger_Warn("I2C bus scan skipped: bus handle not initialized");
