@@ -30,8 +30,8 @@ static float ADC_CalcVDDA(uint16_t raw_vref)
     if (raw_vref == 0)
         return 0.0f;
 
-    uint16_t vref_cal = *VREFINT_CAL_ADDR;
-
+    uint16_t vref_cal = *VREFINT_CAL_ADDR; // defined in ADC header file and also in 'stm32f4xx_ll_adc.h'
+    // vref_cal is the factory calibrated ADC value when voltage was at 'VREFINT_CAL_VREF'
     /* VDDA = (VREF_CAL_VOLTAGE * VREFINT_CAL) / RAW */
     float vdda = ((float)VREFINT_CAL_VREF * (float)vref_cal) / (float)raw_vref;
 
@@ -43,8 +43,8 @@ static float ADC_CalcVDDA(uint16_t raw_vref)
  */
 static float ADC_CalcTemperature(uint16_t raw_temp, float vdda)
 {
-    uint16_t ts_cal1 = *TEMPSENSOR_CAL1_ADDR;
-    uint16_t ts_cal2 = *TEMPSENSOR_CAL2_ADDR;
+    uint16_t ts_cal1 = *TEMPSENSOR_CAL1_ADDR; // ADC count to temp sensor at 30C
+    uint16_t ts_cal2 = *TEMPSENSOR_CAL2_ADDR; // 110C
 
     float vdda_cal = TEMPSENSOR_CAL_VREFANALOG / 1000.0f; // 3.3V
 

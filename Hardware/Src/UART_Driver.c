@@ -7,20 +7,48 @@
 #define UART_TX_DMA_BUFFER_SIZE 128U
 
 typedef struct {
-
 	UART_HandleTypeDef *huart;
-	RingBuffer_t tx_buffer;
+
+	/**
+	 *	This is the transmit queue for the channel, when UART functions are called, 
+	 *	the bytes are pushed into this ring buffer first. That means TX is non-blocking.
+	 *	the driver later pulls bytes out and sends them via DMA. 				
+	 */ 
+	RingBuffer_t rx_buffer;
+
+	/**
+	 * 	When a byte arrives in interrupt context: the RX callback stores it into this
+	 *  ring buffer. 
+	 */
+	RingBuffer_t tx_buffer; 
+
+	/**
+	 * 	This is the temporary DMA staging buffer for transmission. Many bytes accumulate
+	 * 	in 'tx_buffer' then when DMA is idle, the driver 'pops' up to 'UART_TX_DMA_BUFFER_SIZE'
+	 * 	bytes from the 'tx_buffer' to 'tx_dma_buffer'
+	 */
 	uint8_t tx_dma_buffer[UART_TX_DMA_BUFFER_SIZE];
+
+	/**
+	 * 	This holds the single most recently received byte for interrupt-driven RX. 
+	 * 	When it arrives HAL writes it into 'rx_byte' 
+	 * 	The RX complete callback runs and the driver pushes that byte into the 'rx_buffer'
+	 * 	Then it re-arms reception again into the same rx_byte
+	 */
+	uint8_t rx_byte;
+
+	/*	This is the length of the currently prepared DMA chunk in tx_dma_buffer					*/
 	volatile uint16_t tx_dma_len;
+
+	/* 	This is the channel’s “DMA transmit currently active” flag.								*/
 	volatile uint8_t dma_busy;
+
+	/*	This counts how many received bytes were dropped because the RX ring buffer was full.	*/
+	volatile uint32_t rx_overflow_count;
 
 } UART_ChannelState_t;
 
 static UART_ChannelState_t uart_channels[UART_DRIVER_CHANNEL_COUNT];
-static UART_HandleTypeDef *pConsoleUart = NULL;
-static RingBuffer_t rx_buffer;
-static uint8_t rx_byte;
-static volatile uint32_t rx_overflow_count = 0U;
 
 static uint32_t UART_EnterCritical(void)
 {
@@ -49,6 +77,11 @@ static UART_ChannelState_t *UART_GetChannel(UART_Driver_Channel_t channel)
 	}
 
 	return &uart_channels[channel];
+}
+
+static UART_ChannelState_t *UART_GetConsoleChannel(void)
+{
+	return UART_GetChannel(UART_DRIVER_CHANNEL_CONSOLE);
 }
 
 /*
@@ -141,7 +174,7 @@ UART_Driver_Status_t UART_Driver_Init(UART_HandleTypeDef *huart){
 }
 
 
-/* 
+/*
 	Gets the address of a channel in the uart_channel array and then
 	initialises the rest of the struct, if the channel is a console channel
 	then initialises a ringbuffer and enables its recieve interrupt
@@ -160,36 +193,49 @@ UART_Driver_Status_t UART_Driver_InitChannel(UART_Driver_Channel_t channel, UART
 	if((state == NULL) || (huart == NULL)) return UART_DRIVER_INVALID_PARAM;
 
 	RingBuffer_Init(&state->tx_buffer);
+	RingBuffer_Init(&state->rx_buffer);
 	state->huart = huart;
+	state->rx_byte = 0U;
 	state->tx_dma_len = 0U;
 	state->dma_busy = 0U;
+	state->rx_overflow_count = 0U;
 
 	if(channel == UART_DRIVER_CHANNEL_CONSOLE){
-		RingBuffer_Init(&rx_buffer);
-		pConsoleUart = huart;
-		rx_overflow_count = 0U;
-
-		HAL_StatusTypeDef hal_status = HAL_UART_Receive_IT(pConsoleUart, &rx_byte, 1);
+		HAL_StatusTypeDef hal_status = HAL_UART_Receive_IT(huart, &state->rx_byte, 1);
 		if(hal_status != HAL_OK) return (hal_status == HAL_BUSY) ? UART_DRIVER_BUSY : UART_DRIVER_ERROR;
 	}
 
 	return UART_DRIVER_OK;
 }
 
-// RX (only one global buffer is used here as only one source of rx is used)
+// RX (the public RX API still exposes only the console channel)
 /** @copydoc UART_ReadByte */
 bool UART_ReadByte(uint8_t *data){
-	return RingBuffer_Pop(&rx_buffer, data);
+	UART_ChannelState_t *state = UART_GetConsoleChannel();
+
+	if(state == NULL){
+		return false;	
+	}
+
+	return RingBuffer_Pop(&state->rx_buffer, data);
 }
 
 /** @copydoc UART_Available */
 uint16_t UART_Available(void){
-	return RingBuffer_Available(&rx_buffer);
+	UART_ChannelState_t *state = UART_GetConsoleChannel();
+
+	if(state == NULL){
+		return 0U;
+	}
+
+	return RingBuffer_Available(&state->rx_buffer);
 }
 
 /** @copydoc UART_GetRxOverflowCount */
 uint32_t UART_GetRxOverflowCount(void){
-	return rx_overflow_count;
+	UART_ChannelState_t *state = UART_GetConsoleChannel();
+
+	return (state == NULL) ? 0U : state->rx_overflow_count;
 }
 
 // TX
@@ -269,20 +315,23 @@ const char *UART_Driver_StatusToString(UART_Driver_Status_t status)
  */
 void UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-    if (huart != pConsoleUart)
-        return;
+	UART_ChannelState_t *state = UART_GetConsoleChannel();
 
-    /* Store byte ONLY */
-    if(!RingBuffer_Push(&rx_buffer, rx_byte)){
-    	rx_overflow_count++;
-    }
+	if((state == NULL) || (huart != state->huart)){
+		return;
+	}
 
-    /* Restart RX */
-    if (HAL_UART_Receive_IT(pConsoleUart, &rx_byte, 1) != HAL_OK)
-    {
-        HAL_UART_AbortReceive(pConsoleUart);
-        HAL_UART_Receive_IT(pConsoleUart, &rx_byte, 1);
-    }
+	/* Store byte ONLY */
+	if(!RingBuffer_Push(&state->rx_buffer, state->rx_byte)){
+		state->rx_overflow_count++;
+	}
+
+	/* Restart RX */
+	if (HAL_UART_Receive_IT(huart, &state->rx_byte, 1) != HAL_OK)
+	{
+		HAL_UART_AbortReceive(huart);
+		HAL_UART_Receive_IT(huart, &state->rx_byte, 1);
+	}
 }
 
 /** @copydoc UART_TxCpltCallback */
@@ -327,8 +376,6 @@ void UART_ErrorCallback(UART_HandleTypeDef *huart)
 
 	UART_StartTxDMA(state);
 }
-
-
 
 
 

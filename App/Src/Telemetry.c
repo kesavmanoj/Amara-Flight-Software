@@ -128,6 +128,7 @@ static uint32_t Telemetry_GetRtcTimestampSeconds(TelemetryTimestampSource_t *sou
 	 * agent sets a real wall-clock time, treat the timestamp as uptime seconds
 	 * so consumers do not mistake the default epoch for a valid mission time.
 	 */
+
 	if((sDate.Year == 0U) &&
 	   (sDate.Month == RTC_MONTH_JANUARY) &&
 	   (sDate.Date == 1U) &&
@@ -240,7 +241,7 @@ void Telemetry_Init(CRC_HandleTypeDef *hcrc){
 		return;
 	}
 
-	pCrc 	= hcrc;
+	pCrc = hcrc;
 
 	FrameQueue_Init(&telem_queue, (uint8_t *)frame_buffer, sizeof(TelemetryFrame_t), TELEM_QUEUE_SIZE);
 	frame_pending = false;

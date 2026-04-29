@@ -513,7 +513,7 @@ bool IPMS_GetPendingAction(IPMS_ActionRequest_t *request)
     {
         request->duration_ms = g_ipms.config.sleep_duration_ms;
     }
-    else
+    else 
     {
         request->duration_ms = g_ipms.config.stop_duration_ms;
     }

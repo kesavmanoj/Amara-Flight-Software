@@ -10,6 +10,7 @@
 
 /** @brief Reset the command-parser line buffer state. */
 void CommandParser_Init(void);
+
 /**
  * @brief Consume available console UART bytes and dispatch complete command lines.
  *

@@ -132,7 +132,7 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     uint16_t sync_word;
     uint32_t timestamp;
-    uint8_t  packet_id;
+    uint8_t  packet_id; // TelemetryPacketID_t
     uint8_t  payload_length;
     uint8_t  payload[TELEM_PAYLOAD_SIZE];
     uint32_t crc;

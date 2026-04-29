@@ -536,14 +536,14 @@ static Command_Status_t CMD_SD_TEST(int argc, char *argv[], Command_Result_t *re
 
 /** @brief Static command table walked by @ref Command_DispatchLine. */
 const CommandEntry_t command_table[] = {
-		{"PING"		, 		CMD_PING	 },
-		{"GET_ADC"	, 		CMD_GET_ADC	 },
-		{"SET_RATE"	, 		CMD_SET_RATE },
-		{"PWR_STATUS",  CMD_PWR_STATUS},
-		{"PWR_SIM",     CMD_PWR_SIM},
-		{"PWR_POLICY",  CMD_PWR_POLICY},
-        {"SD_STATUS",   CMD_SD_STATUS},
-        {"SD_TEST",     CMD_SD_TEST}
+		{"PING"			,	CMD_PING		},
+		{"GET_ADC"		,	CMD_GET_ADC		},
+		{"SET_RATE"		,	CMD_SET_RATE	},
+		{"PWR_STATUS"	,	CMD_PWR_STATUS	},
+		{"PWR_SIM"		,	CMD_PWR_SIM		},
+		{"PWR_POLICY"	,	CMD_PWR_POLICY	},
+        {"SD_STATUS"	,	CMD_SD_STATUS	},
+        {"SD_TEST"		,	CMD_SD_TEST		}
 };
 
 const uint32_t command_count =
