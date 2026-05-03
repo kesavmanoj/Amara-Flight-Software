@@ -8,6 +8,21 @@
 
 #define SPI_TIMEOUT_MS 100
 
+static SPI_Driver_Status_t SPI_ConvertHalStatus(HAL_StatusTypeDef status)
+{
+	switch(status){
+	case HAL_OK:
+		return SPI_DRIVER_OK;
+	case HAL_BUSY:
+		return SPI_DRIVER_BUSY;
+	case HAL_TIMEOUT:
+		return SPI_DRIVER_TIMEOUT;
+	case HAL_ERROR:
+	default:
+		return SPI_DRIVER_ERROR;
+	}
+}
+
 static inline void SPI_Delay(void)
 {
     /* Small delay for CS setup time if needed */
@@ -17,7 +32,7 @@ static inline void SPI_Delay(void)
 // SPI Init
 SPI_Driver_Status_t SPI_Device_Init(SPI_Device_t *dev, SPI_HandleTypeDef *hspi, GPIO_TypeDef *cs_port, uint16_t cs_pin){
 
-	if((dev == NULL) || (hspi == NULL)) return SPI_DRIVER_ERROR;
+	if((dev == NULL) || (hspi == NULL) || (cs_port == NULL)) return SPI_DRIVER_INVALID_PARAM;
 
 	dev -> hspi 	= hspi;
 	dev -> cs_port 	= cs_port;
@@ -43,29 +58,28 @@ void SPI_CS_Low(SPI_Device_t *dev){
 // SPI Transfers
 SPI_Driver_Status_t SPI_Transmit(SPI_Device_t *dev, uint8_t *pData, uint16_t len){
 
-	if(dev == NULL || pData == NULL) return SPI_DRIVER_ERROR;
-	if(HAL_SPI_Transmit(dev -> hspi, pData, len, SPI_TIMEOUT_MS) != HAL_OK) return SPI_DRIVER_ERROR;
+	if((dev == NULL) || (pData == NULL) || (len == 0U)) return SPI_DRIVER_INVALID_PARAM;
+	if(dev->hspi == NULL) return SPI_DRIVER_NOT_INITIALIZED;
+	return SPI_ConvertHalStatus(HAL_SPI_Transmit(dev -> hspi, pData, len, SPI_TIMEOUT_MS));
 
-	return SPI_DRIVER_OK;
 }
 
-SPI_Driver_Status_t SPI_Recieve(SPI_Device_t *dev, uint8_t *pData, uint16_t len){
+SPI_Driver_Status_t SPI_Receive(SPI_Device_t *dev, uint8_t *pData, uint16_t len){
 
-	if(dev == NULL || pData == NULL) return SPI_DRIVER_ERROR;
-	if(HAL_SPI_Receive(dev -> hspi, pData, len, SPI_TIMEOUT_MS) != HAL_OK) return SPI_DRIVER_ERROR;
+	if((dev == NULL) || (pData == NULL) || (len == 0U)) return SPI_DRIVER_INVALID_PARAM;
+	if(dev->hspi == NULL) return SPI_DRIVER_NOT_INITIALIZED;
+	return SPI_ConvertHalStatus(HAL_SPI_Receive(dev -> hspi, pData, len, SPI_TIMEOUT_MS));
 
-	return SPI_DRIVER_OK;
 }
 
 SPI_Driver_Status_t SPI_TransmitReceive(SPI_Device_t *dev, uint8_t *tx, uint8_t *rx, uint16_t len)
 {
-    if (dev == NULL || tx == NULL || rx == NULL)
-        return SPI_DRIVER_ERROR;
+    if ((dev == NULL) || (tx == NULL) || (rx == NULL) || (len == 0U))
+        return SPI_DRIVER_INVALID_PARAM;
+    if (dev->hspi == NULL)
+        return SPI_DRIVER_NOT_INITIALIZED;
 
-    if (HAL_SPI_TransmitReceive(dev->hspi, tx, rx, len, SPI_TIMEOUT_MS) != HAL_OK)
-        return SPI_DRIVER_ERROR;
-
-    return SPI_DRIVER_OK;
+    return SPI_ConvertHalStatus(HAL_SPI_TransmitReceive(dev->hspi, tx, rx, len, SPI_TIMEOUT_MS));
 }
 
 uint8_t SPI_TransferByte(SPI_Device_t *dev, uint8_t data)
@@ -76,5 +90,24 @@ uint8_t SPI_TransferByte(SPI_Device_t *dev, uint8_t data)
         return 0;
 
     return rx;
+}
+
+const char *SPI_Driver_StatusToString(SPI_Driver_Status_t status)
+{
+	switch(status){
+	case SPI_DRIVER_OK:
+		return "OK";
+	case SPI_DRIVER_INVALID_PARAM:
+		return "INVALID_PARAM";
+	case SPI_DRIVER_NOT_INITIALIZED:
+		return "NOT_INITIALIZED";
+	case SPI_DRIVER_BUSY:
+		return "BUSY";
+	case SPI_DRIVER_TIMEOUT:
+		return "TIMEOUT";
+	case SPI_DRIVER_ERROR:
+	default:
+		return "ERROR";
+	}
 }
 

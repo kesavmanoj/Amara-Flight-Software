@@ -8,12 +8,36 @@
 
 #include "Logger.h"
 #include "rtc.h"
+#include "cmsis_os2.h"
 #include "UART_Driver.h"
 
 #define LOG_BUFFER_SIZE 256
 
+static volatile uint32_t g_logger_dropped_count = 0U;
+static volatile uint32_t g_logger_attempted_count = 0U;
+static volatile uint32_t g_logger_persist_dropped_count = 0U;
+static volatile UART_Driver_Status_t g_logger_last_uart_status = UART_DRIVER_NOT_INITIALIZED;
+static volatile StorageService_Status_t g_logger_last_storage_status = STORAGE_SERVICE_STATUS_NOT_READY;
+extern osMutexId_t ConsoleMutexHandle;
+
+static bool Logger_LockConsole(void)
+{
+	if((osKernelGetState() == osKernelRunning) && (ConsoleMutexHandle != NULL)){
+		return (osMutexAcquire(ConsoleMutexHandle, osWaitForever) == osOK);
+	}
+
+	return false;
+}
+
+static void Logger_UnlockConsole(bool locked)
+{
+	if(locked){
+		(void)osMutexRelease(ConsoleMutexHandle);
+	}
+}
+
 // Helper Functions
-static void Get_Timestamp(char* buf, size_t buf_size){
+void Get_Timestamp(char* buf, size_t buf_size){
 	RTC_TimeTypeDef sTime;
 	RTC_DateTypeDef sDate;
 
@@ -41,8 +65,12 @@ static void Logger_Log(const char *prefix, const char *fmt, va_list args)
 {
     char timestamp[24];
     char log_buffer[LOG_BUFFER_SIZE];
+    UART_Driver_Status_t uart_status;
+    StorageService_Status_t storage_status = STORAGE_SERVICE_STATUS_NOT_READY;
+    bool console_locked;
 
     Get_Timestamp(timestamp, sizeof(timestamp));
+    console_locked = Logger_LockConsole();
 
     int len = 0;
 
@@ -78,7 +106,28 @@ static void Logger_Log(const char *prefix, const char *fmt, va_list args)
         len = LOG_BUFFER_SIZE;
 
     /* Transmit using UART driver */
-    UART_Write((uint8_t*)log_buffer, (uint16_t)len);
+    g_logger_attempted_count++;
+    uart_status = UART_Write((uint8_t*)log_buffer, (uint16_t)len);
+    g_logger_last_uart_status = uart_status;
+
+    if (uart_status != UART_DRIVER_OK)
+    {
+        g_logger_dropped_count++;
+    }
+
+    if ((osKernelGetState() == osKernelRunning) && (__get_IPSR() == 0U))
+    {
+        storage_status = StorageService_EnqueueLogLine(log_buffer, (uint16_t)len);
+        g_logger_last_storage_status = storage_status;
+
+        if ((storage_status != STORAGE_SERVICE_STATUS_OK) &&
+            (storage_status != STORAGE_SERVICE_STATUS_NOT_READY))
+        {
+            g_logger_persist_dropped_count++;
+        }
+    }
+
+    Logger_UnlockConsole(console_locked);
 }
 
 void Logger_Info(const char *fmt, ...){
@@ -102,5 +151,21 @@ void Logger_Error(const char *fmt, ...){
 	va_end(args);
 }
 
+uint32_t Logger_GetDroppedCount(void)
+{
+    return g_logger_dropped_count;
+}
 
+void Logger_GetStats(Logger_Stats_t *stats)
+{
+    if (stats == NULL)
+    {
+        return;
+    }
 
+    stats->messages_attempted = g_logger_attempted_count;
+    stats->messages_dropped = g_logger_dropped_count;
+    stats->messages_persist_dropped = g_logger_persist_dropped_count;
+    stats->last_uart_status = g_logger_last_uart_status;
+    stats->last_storage_status = g_logger_last_storage_status;
+}

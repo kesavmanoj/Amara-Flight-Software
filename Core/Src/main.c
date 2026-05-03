@@ -34,7 +34,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include <string.h>
+#include <stdbool.h>
 #include "Telemetry.h"
 #include "ADC_Monitor.h"
 #include "Logger.h"
@@ -42,6 +42,14 @@
 #include "Ring_Buffer.h"
 #include "UART_Driver.h"
 #include "Command_Parser.h"
+#include "I2C_Bus.h"
+#include "OLED_Display.h"
+#include "SX1278.h"
+#include "G2S_Link.h"
+#include "IPMS.h"
+#include "Runtime_Resources.h"
+#include "Runtime_State.h"
+#include "System_Runtime.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -62,8 +70,6 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-static volatile uint32_t g_telem_tx_complete_count = 0;
-static volatile uint32_t g_telem_error_count = 0;
 
 /* USER CODE END PV */
 
@@ -71,18 +77,26 @@ static volatile uint32_t g_telem_error_count = 0;
 void SystemClock_Config(void);
 void MX_FREERTOS_Init(void);
 /* USER CODE BEGIN PFP */
+void RTOS_NotifyCommTaskRxFromISR(void);
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
 /* USER CODE END 0 */
 
-/**
-  * @brief  The application entry point.
-  * @retval int
-  */
+  /**
+   * @brief  Perform one-time board bring-up and hand control to the RTOS runtime.
+   *
+   * This function is the firmware boot boundary. It performs HAL startup, clock and
+   * peripheral initialization, binds the shared runtime resource and hook structures,
+   * initializes project-owned modules such as UART transport, telemetry, IPMS, radio,
+   * ADC monitoring, and OLED support, then creates RTOS objects and starts the
+   * scheduler. After osKernelStart() succeeds, periodic behavior is task-owned rather
+   * than being driven from main().
+   *
+   * @retval int Unused. Execution is expected to remain under scheduler control.
+   */
 int main(void)
 {
 
@@ -121,6 +135,34 @@ int main(void)
   MX_RTC_Init();
   MX_FATFS_Init();
   /* USER CODE BEGIN 2 */
+  I2C_Bus_Handle_t *i2c_bus;
+  OLED_HandleTypeDef *oled;
+  SX1278_Handle_t *radio;
+  G2S_Link_Handle_t *g2s_link;
+  IPMS_Config_t *ipms_config;
+  SystemRuntimeContext_t *runtime_context;
+  SystemRuntimeHooks_t *runtime_hooks;
+
+  RuntimeResources_Init();
+  i2c_bus = RuntimeResources_GetI2CBus();
+  oled = RuntimeResources_GetOled();
+  radio = RuntimeResources_GetRadio();
+  g2s_link = RuntimeResources_GetG2SLink();
+  ipms_config = RuntimeResources_GetIpmsConfig();
+  runtime_context = RuntimeResources_GetSystemRuntimeContext();
+  runtime_hooks = RuntimeResources_GetSystemRuntimeHooks();
+
+  *runtime_hooks = (SystemRuntimeHooks_t){
+      .SystemClock_Config = SystemClock_Config,
+      .MX_DMA_Init = MX_DMA_Init,
+      .MX_USART1_UART_Init = MX_USART1_UART_Init,
+      .MX_USART2_UART_Init = MX_USART2_UART_Init,
+      .MX_I2C1_Init = MX_I2C1_Init,
+      .MX_SPI1_Init = MX_SPI1_Init,
+      .MX_ADC1_Init = MX_ADC1_Init,
+      .MX_CRC_Init = MX_CRC_Init
+  };
+  RuntimeState_Init();
 
   UART_Driver_Status_t uart_status = UART_Driver_Init(&huart2);
   UART_Driver_Status_t telem_uart_status = UART_Driver_InitChannel(UART_DRIVER_CHANNEL_TELEMETRY, &huart1);
@@ -128,28 +170,74 @@ int main(void)
   ADC_Monitor_Status_t adc_init_status = ADC_Monitor_Init(&hadc1);
   ADC_Monitor_Status_t adc_start_status = ADC_Monitor_Start();
   Telemetry_Init(&hcrc);
-  bool boot_telem_status = Telemetry_SendSystemStatus(0x01U);
-  bool boot_event_status = Telemetry_SendEvent(TELEM_EVENT_BOOT, HAL_GetTick());
+  Telemetry_SetDownlinkMode(TELEM_DOWNLINK_RADIO_WITH_UART_MIRROR);
+  Telemetry_Status_t boot_telem_status = Telemetry_SendSystemStatusEx(0x01U);
+  Telemetry_Status_t boot_event_status = Telemetry_SendEventEx(TELEM_EVENT_BOOT, HAL_GetTick());
+  IPMS_GetDefaultConfig(ipms_config);
+  IPMS_Status_t ipms_status = IPMS_Init(ipms_config);
+  SX1278_Status_t radio_status = SX1278_Init(radio, &hspi1, LORA_CS_GPIO_Port, LORA_CS_Pin, NULL, 0U, false);
+  G2S_Status_t g2s_status = G2S_Link_Init(g2s_link, radio, &hcrc);
+
+  I2C_Status_t i2c_bus_status = I2C_Bus_Init(i2c_bus, &hi2c1);
+  OLED_Status_t oled_status = OLED_STATUS_INVALID_PARAM;
+
+  runtime_context->hrtc = &hrtc;
+  runtime_context->hiwdg = &hiwdg;
+  runtime_context->hadc = &hadc1;
+  runtime_context->hi2c = &hi2c1;
+  runtime_context->hspi = &hspi1;
+  runtime_context->console_uart = &huart2;
+  runtime_context->telemetry_uart = &huart1;
+  runtime_context->i2c_bus = i2c_bus;
+  runtime_context->oled = oled;
+  runtime_context->radio = radio;
+
+  if (i2c_bus_status == I2C_OK)
+  {
+    oled_status = OLED_Init(oled, i2c_bus, OLED_I2C_ADDR_0x3C);
+    if (oled_status == OLED_STATUS_OK){
+
+      OLED_Clear(oled);
+      OLED_SetCursor(oled, 0U, 0U);
+      OLED_WriteString(oled, "CubeSat FC", OLED_COLOR_WHITE);
+      OLED_SetCursor(oled, 0U, 16U);
+      OLED_WriteString(oled, "OLED OK", OLED_COLOR_WHITE);
+      OLED_UpdateScreen(oled);
+
+    }
+  }
 
   Logger_Info("Initialization Complete");
   Logger_Info("CLI/Logger UART=USART2 @115200, Telemetry UART=USART1 @57600");
-  Logger_Info("Startup status: UART=%d TELEM_UART=%d ADC_INIT=%d ADC_START=%d TELEM_BOOT_QUEUE=%d BOOT_EVT_QUEUE=%d",
-		  uart_status,
-		  telem_uart_status,
-		  adc_init_status,
-		  adc_start_status,
-		  boot_telem_status ? 1 : 0,
-		  boot_event_status ? 1 : 0);
+  Logger_Info("Startup status: UART=%s TELEM_UART=%s ADC_INIT=%s ADC_START=%s TELEM_BOOT=%s BOOT_EVT=%s IPMS=%s RADIO=%s G2S=%s I2C=%s OLED=%d",
+		  UART_Driver_StatusToString(uart_status),
+		  UART_Driver_StatusToString(telem_uart_status),
+		  ADC_Monitor_StatusToString(adc_init_status),
+		  ADC_Monitor_StatusToString(adc_start_status),
+		  Telemetry_StatusToString(boot_telem_status),
+		  Telemetry_StatusToString(boot_event_status),
+      IPMS_StatusToString(ipms_status),
+		  SX1278_StatusToString(radio_status),
+		  G2S_StatusToString(g2s_status),
+		  I2C_Bus_StatusToString(i2c_bus_status),
+		  oled_status);
+  Logger_Info("IPMS defaults: warn<=%.2f sleep<=%.2f stop<=%.2f policy=%s sim=%s",
+              ipms_config->warn_enter_v,
+              ipms_config->sleep_enter_v,
+              ipms_config->stop_enter_v,
+              IPMS_PolicyModeToString(IPMS_POLICY_MONITOR_ONLY),
+              IPMS_SimulationModeToString(IPMS_SIMULATION_AUTO));
+  Logger_Info("Telemetry downlink mode: %s", Telemetry_DownlinkModeToString(Telemetry_GetDownlinkMode()));
 
 
   /* USER CODE END 2 */
 
   /* Init scheduler */
-//  osKernelInitialize();  /* Call init function for freertos objects (in cmsis_os2.c) */
-//  MX_FREERTOS_Init();
-//
-//  /* Start scheduler */
-//  osKernelStart();
+  osKernelInitialize();  /* Call init function for freertos objects (in cmsis_os2.c) */
+  MX_FREERTOS_Init();
+
+  /* Start scheduler */
+  osKernelStart();
 
   /* We should never get here as control is now taken by the scheduler */
 
@@ -157,67 +245,10 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  static uint32_t last_heartbeat_ms = 0;
-	  static uint32_t last_telem_queue_ms = 0;
-	  static uint32_t last_telem_report_ms = 0;
-	  static uint32_t last_adc_report_ms = 0;
-	  static uint8_t telemetry_status_counter = 0;
-	  uint32_t now = HAL_GetTick();
-	  
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	CommandParser_Process();
-	Telemetry_Process();
-	HAL_IWDG_Refresh(&hiwdg);
-
-	if((now - last_heartbeat_ms) >= 500U){
-		last_heartbeat_ms = now;
-		HAL_GPIO_TogglePin(LD2_HEARTBEAT_GPIO_Port, LD2_HEARTBEAT_Pin);
-	}
-
-	if((now - last_telem_queue_ms) >= 2000U){
-		uint8_t status_code = (uint8_t)(0x10U | (telemetry_status_counter & 0x0FU));
-		bool queued = Telemetry_SendSystemStatus(status_code);
-		Logger_Info("Telemetry queue attempt: queued=%d status=0x%02X",
-				queued ? 1 : 0,
-				status_code);
-		telemetry_status_counter++;
-		last_telem_queue_ms = now;
-	}
-
-	if((now - last_telem_report_ms) >= 3000U){
-		bool heartbeat_queued = Telemetry_SendHeartbeat();
-		Logger_Info("Telemetry UART DMA counters: tx_complete=%lu tx_error=%lu",
-				(unsigned long)g_telem_tx_complete_count,
-				(unsigned long)g_telem_error_count);
-		Logger_Info("Telemetry heartbeat queue: queued=%d", heartbeat_queued ? 1 : 0);
-		last_telem_report_ms = now;
-	}
-
-	if((now - last_adc_report_ms) >= 5000U){
-		ADC_HealthData_t adc_data;
-		ADC_Monitor_Status_t adc_status = ADC_Monitor_GetData(&adc_data);
-
-		if(adc_status == ADC_MONITOR_OK){
-			bool adc_telem_queued = Telemetry_SendADCHealth(
-					adc_data.vdda_voltage,
-					adc_data.battery_voltage,
-					adc_data.mcu_temp_c);
-
-			Logger_Info("ADC health: VDDA=%.3fV TEMP=%.2fC BATT=%.3fV",
-					adc_data.vdda_voltage,
-					adc_data.mcu_temp_c,
-					adc_data.battery_voltage);
-			Logger_Info("ADC telemetry queue: queued=%d", adc_telem_queued ? 1 : 0);
-		} else {
-			bool adc_error_event = Telemetry_SendEvent(TELEM_EVENT_ADC_READ_ERROR, (uint32_t)adc_status);
-			Logger_Warn("ADC health read failed: status=%d", adc_status);
-			Logger_Warn("ADC error event queue: queued=%d", adc_error_event ? 1 : 0);
-		}
-
-		last_adc_report_ms = now;
-	}
+    /* Runtime is owned by FreeRTOS tasks after osKernelStart(). */
   }
   /* USER CODE END 3 */
 }
@@ -282,6 +313,7 @@ void SystemClock_Config(void)
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     UART_RxCpltCallback(huart);
+    RTOS_NotifyCommTaskRxFromISR();
 }
 
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
@@ -293,7 +325,7 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart == &huart1)
     {
-        g_telem_tx_complete_count++;
+        RuntimeState_RecordTelemetryTxComplete();
     }
 
     UART_TxCpltCallback(huart);
@@ -303,10 +335,24 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
     if (huart == &huart1)
     {
-        g_telem_error_count++;
+        RuntimeState_RecordTelemetryError();
     }
 
     UART_ErrorCallback(huart);
+}
+
+void HAL_RTCEx_WakeUpTimerEventCallback(RTC_HandleTypeDef *hrtc_handle)
+{
+    (void)hrtc_handle;
+    IPMS_OnRtcWakeup();
+}
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+    if (GPIO_Pin == B1_USER_BUTTON_Pin)
+    {
+        IPMS_OnButtonWakeup();
+    }
 }
 
 /* USER CODE END 4 */

@@ -38,15 +38,26 @@ uint16_t RingBuffer_Available(RingBuffer_t *rb);
 
 /* 			FRAME BUFFER			 */
 
+typedef enum {
+	FRAME_QUEUE_FAIL_ON_FULL = 0,
+	FRAME_QUEUE_DROP_OLDEST_ON_FULL
+} FrameQueueFullPolicy_t;
+
 typedef struct {
 	uint8_t *buffer;
 	uint16_t element_size;
 	uint16_t capacity;
+	FrameQueueFullPolicy_t full_policy;
 	volatile uint16_t head;
 	volatile uint16_t tail;
 } FrameQueue_t;
 
 void FrameQueue_Init(FrameQueue_t *fq, uint8_t *buffer, uint16_t element_size, uint16_t capacity);
+void FrameQueue_InitWithPolicy(FrameQueue_t *fq,
+		uint8_t *buffer,
+		uint16_t element_size,
+		uint16_t capacity,
+		FrameQueueFullPolicy_t full_policy);
 
 bool FrameQueue_IsEmpty(FrameQueue_t *fq);
 bool FrameQueue_IsFull(FrameQueue_t *fq);

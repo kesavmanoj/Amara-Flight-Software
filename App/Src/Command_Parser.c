@@ -1,97 +1,71 @@
-/*
- * Command_Parser.c
- *
- *  Created on: 20-Mar-2026
- *      Author: KESAV
+/**
+ * @file Command_Parser.c
+ * @brief Console UART byte-stream parser implementation.
  */
 
 
 #include "Command_Parser.h"
 #include "Command_List.h"
 
-#include "uart_driver.h"
-#include "logger.h"
+#include "UART_Driver.h"
+#include "Logger.h"
+#include "Telemetry.h"
 
-#include <string.h>
-
-#define CMD_BUFFER_SIZE 128
-#define MAX_TOKENS      5
-
-static char cmd_buffer[CMD_BUFFER_SIZE];
+static char cmd_buffer[COMMAND_MAX_LINE_LENGTH];
 static uint16_t cmd_index = 0;
 
-
-static int tokenize(char *input, char *argv[], int max_tokens){
-	int argc = 0;
-	char *token = strtok(input, " ");
-
-	while(token != NULL && argc < max_tokens){
-		argv[argc++] = token;
-		token = strtok(NULL, " ");
-	}
-
-	return argc;
-}
-
-static void CommandParser_Execute(char* cmd_line){
-
-	char *argv[MAX_TOKENS];
-	int argc = tokenize(cmd_line, argv, MAX_TOKENS);
-
-	if(argc == 0) return;
-
-	// Command Table
-	for(uint32_t i = 0; i < command_count; i++){
-		if(strcmp(argv[0], command_table[i].name) == 0){
-
-			command_table[i].handler(argc, argv);
-			return;
-
-		}
-	}
-
-	UART_WriteString("ERR: Unknown Command\r\n");
-}
-
-static void CommandParser_ProcessByte(uint8_t byte){
-
-	if (byte == '\r' || byte == '\n')
+/**
+ * @brief Consume one console byte and update the current command-line buffer.
+ *
+ * Bytes are appended until a line terminator arrives. At that point the buffered line
+ * is dispatched through @ref Command_DispatchLine. Overflow resets the line buffer and
+ * reports the condition through logging, telemetry, and a console error response.
+ */
+static void CommandParser_ProcessByte(uint8_t byte)
+{
+	if ((byte == '\r') || (byte == '\n'))
 	{
 	    cmd_buffer[cmd_index] = '\0';
 
-	    if (cmd_index > 0)
+	    if (cmd_index > 0U)
 	    {
-	        CommandParser_Execute(cmd_buffer);
+	        (void)Command_DispatchLine(cmd_buffer);
 	    }
 
-	    cmd_index = 0;
+	    cmd_index = 0U;
 	    return;
 	}
 
-	if(cmd_index < CMD_BUFFER_SIZE - 1){
+	if(cmd_index < (COMMAND_MAX_LINE_LENGTH - 1U)){
 		cmd_buffer[cmd_index++] = (char)byte;
 	} else {
-		// Overflow error
-		cmd_index = 0;
-		Logger_Info("CMD Buffer overflow error");
+		cmd_index = 0U;
+		Logger_Warn("Command buffer overflow");
+		(void)Telemetry_SendEventEx(TELEM_EVENT_COMMAND_OVERFLOW, COMMAND_MAX_LINE_LENGTH);
+		(void)UART_WriteString("ERR: Command Overflow\r\n");
 	}
 }
 
 // API Functions
 
-void CommandParser_Process(void){
-
+/**
+ * @copydoc CommandParser_Process
+ *
+ * Runtime ownership note:
+ * - UART_RxCpltCallback() only queues bytes
+ * - CommTask later consumes queued bytes in task context through this function
+ */
+void CommandParser_Process(void)
+{
 	uint8_t byte;
+
 	while(UART_ReadByte(&byte)){
 		CommandParser_ProcessByte(byte);
-
 	}
 }
 
-void CommandParser_Init(void){
-	cmd_index = 0;
+/** @copydoc CommandParser_Init */
+void CommandParser_Init(void)
+{
+	cmd_index = 0U;
 }
-
-
-
-
