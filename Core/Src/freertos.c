@@ -61,6 +61,7 @@ typedef enum {
 #define RTOS_COMM_POLL_PERIOD_MS         5U
 #define RTOS_TELEMETRY_TASK_PERIOD_MS   10U
 #define RTOS_HEALTH_TASK_PERIOD_MS      20U
+#define RTOS_TELEMETRY_DETAIL_PERIOD_MS 15000U
 
 /* USER CODE END PD */
 
@@ -263,6 +264,7 @@ static void RTOS_RunTelemetryRadioTaskCycle(void)
 {
     static uint32_t last_telem_queue_ms = 0U;
     static uint32_t last_telem_report_ms = 0U;
+    static uint32_t last_telem_detail_ms = 0U;
     static uint32_t last_radio_report_ms = 0U;
     static uint8_t telemetry_status_counter = 0U;
     uint32_t now = HAL_GetTick();
@@ -290,34 +292,37 @@ static void RTOS_RunTelemetryRadioTaskCycle(void)
         Telemetry_GetStats(&telem_stats);
         Logger_GetStats(&logger_stats);
 
-        Logger_Info("Telemetry UART DMA counters: tx_complete=%lu tx_error=%lu",
+        Logger_Info("Telemetry runtime: dma_tx=%lu dma_err=%lu hb=%s log=%lu/%lu persist_drop=%lu last_uart=%s last_storage=%s",
                     (unsigned long)telemetry_counters.tx_complete_count,
-                    (unsigned long)telemetry_counters.error_count);
-        Logger_Info("Telemetry heartbeat queue: result=%s",
-                    Telemetry_StatusToString(heartbeat_status));
-        Logger_Info("Telemetry stats: depth=%u/%u peak=%u queued=%lu sent=%lu dropped=%lu tx_busy=%lu tx_err=%lu rtc_fallback=%lu pending=%u last_enq=%s last_proc=%s ts_src=%s mode=%s radio_sent=%lu uart_sent=%lu",
-                    (unsigned int)telem_stats.queue_depth,
-                    (unsigned int)telem_stats.queue_capacity,
-                    (unsigned int)telem_stats.max_queue_depth,
-                    (unsigned long)telem_stats.queued_frames,
-                    (unsigned long)telem_stats.sent_frames,
-                    (unsigned long)telem_stats.dropped_frames,
-                    (unsigned long)telem_stats.tx_busy_retries,
-                    (unsigned long)telem_stats.transport_errors,
-                    (unsigned long)telem_stats.rtc_fallback_count,
-                    (unsigned int)telem_stats.frame_pending,
-                    Telemetry_StatusToString(telem_stats.last_enqueue_status),
-                    Telemetry_StatusToString(telem_stats.last_process_status),
-                    SystemRuntime_TelemetryTimestampSourceToString(telem_stats.last_timestamp_source),
-                    Telemetry_DownlinkModeToString(telem_stats.downlink_mode),
-                    (unsigned long)telem_stats.radio_sent_frames,
-                    (unsigned long)telem_stats.uart_sent_frames);
-        Logger_Info("Logger stats: attempted=%lu dropped=%lu persist_dropped=%lu last_uart=%s last_storage=%s",
+                    (unsigned long)telemetry_counters.error_count,
+                    Telemetry_StatusToString(heartbeat_status),
                     (unsigned long)logger_stats.messages_attempted,
                     (unsigned long)logger_stats.messages_dropped,
                     (unsigned long)logger_stats.messages_persist_dropped,
                     UART_Driver_StatusToString(logger_stats.last_uart_status),
                     StorageService_StatusToString(logger_stats.last_storage_status));
+
+        if ((now - last_telem_detail_ms) >= RTOS_TELEMETRY_DETAIL_PERIOD_MS)
+        {
+            Logger_Info("Telemetry stats: depth=%u/%u peak=%u queued=%lu sent=%lu dropped=%lu tx_busy=%lu tx_err=%lu rtc_fallback=%lu pending=%u last_enq=%s last_proc=%s ts_src=%s mode=%s radio_sent=%lu uart_sent=%lu",
+                        (unsigned int)telem_stats.queue_depth,
+                        (unsigned int)telem_stats.queue_capacity,
+                        (unsigned int)telem_stats.max_queue_depth,
+                        (unsigned long)telem_stats.queued_frames,
+                        (unsigned long)telem_stats.sent_frames,
+                        (unsigned long)telem_stats.dropped_frames,
+                        (unsigned long)telem_stats.tx_busy_retries,
+                        (unsigned long)telem_stats.transport_errors,
+                        (unsigned long)telem_stats.rtc_fallback_count,
+                        (unsigned int)telem_stats.frame_pending,
+                        Telemetry_StatusToString(telem_stats.last_enqueue_status),
+                        Telemetry_StatusToString(telem_stats.last_process_status),
+                        SystemRuntime_TelemetryTimestampSourceToString(telem_stats.last_timestamp_source),
+                        Telemetry_DownlinkModeToString(telem_stats.downlink_mode),
+                        (unsigned long)telem_stats.radio_sent_frames,
+                        (unsigned long)telem_stats.uart_sent_frames);
+            last_telem_detail_ms = now;
+        }
         last_telem_report_ms = now;
     }
 
@@ -330,12 +335,11 @@ static void RTOS_RunTelemetryRadioTaskCycle(void)
         SX1278_Status_t version_status = SX1278_ReadVersion(radio, &version);
 
         G2S_Link_GetStats(g2s_link, &g2s_stats);
-        Logger_Info("Radio status: version_status=%s version=0x%02X mode=%d freq=%luHz",
+        Logger_Info("Radio/G2S: ver=%s/0x%02X mode=%d freq=%luHz rx=%lu tx=%lu crc_fail=%lu cmd=%lu ack=%lu unsupported=%lu cmd_fail=%lu last=%s next_seq=%u last_rx_seq=%u",
                     SX1278_StatusToString(version_status),
                     version,
                     (int)radio->state.mode,
-                    (unsigned long)radio->state.frequency_hz);
-        Logger_Info("G2S stats: rx=%lu tx=%lu crc_fail=%lu cmd=%lu ack=%lu unsupported=%lu cmd_fail=%lu last=%s next_seq=%u last_rx_seq=%u",
+                    (unsigned long)radio->state.frequency_hz,
                     (unsigned long)g2s_stats.rx_packets,
                     (unsigned long)g2s_stats.tx_packets,
                     (unsigned long)g2s_stats.crc_failures,
@@ -442,11 +446,10 @@ static void RTOS_RunHealthPowerTaskCycle(void)
                     latest_adc_sample.battery_voltage,
                     latest_adc_sample.mcu_temp_c);
 
-            Logger_Info("ADC health: VDDA=%.3fV TEMP=%.2fC BATT=%.3fV",
+            Logger_Info("ADC health: VDDA=%.3fV TEMP=%.2fC BATT=%.3fV queue=%s",
                         latest_adc_sample.vdda_voltage,
                         latest_adc_sample.mcu_temp_c,
-                        latest_adc_sample.battery_voltage);
-            Logger_Info("ADC telemetry queue: result=%s",
+                        latest_adc_sample.battery_voltage,
                         Telemetry_StatusToString(adc_telem_status));
         }
         else

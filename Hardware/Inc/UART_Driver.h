@@ -57,6 +57,10 @@ UART_Driver_Status_t UART_Write(uint8_t *data, uint16_t len);
 UART_Driver_Status_t UART_WriteString(const char *str);
 /** @brief Queue one buffer for transmission on the selected UART driver channel. */
 UART_Driver_Status_t UART_WriteChannel(UART_Driver_Channel_t channel, uint8_t *data, uint16_t len);
+/** @brief Return true when the selected TX channel has no queued or active DMA transfer. */
+bool UART_IsChannelIdle(UART_Driver_Channel_t channel);
+/** @brief Convenience wrapper for checking whether the console TX channel is idle. */
+bool UART_IsIdle(void);
 /** @brief Convert UART driver status codes into printable strings. */
 const char *UART_Driver_StatusToString(UART_Driver_Status_t status);
 

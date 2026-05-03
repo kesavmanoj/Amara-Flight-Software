@@ -278,6 +278,29 @@ UART_Driver_Status_t UART_WriteChannel(UART_Driver_Channel_t channel, uint8_t *d
 	return UART_DRIVER_OK;
 }
 
+/** @copydoc UART_IsChannelIdle */
+bool UART_IsChannelIdle(UART_Driver_Channel_t channel)
+{
+	UART_ChannelState_t *state = UART_GetChannel(channel);
+	bool is_idle;
+	uint32_t primask;
+
+	if((state == NULL) || (state->huart == NULL)){
+		return true;
+	}
+
+	primask = UART_EnterCritical();
+	is_idle = (state->dma_busy == 0U) && RingBuffer_IsEmpty(&state->tx_buffer) && (state->tx_dma_len == 0U);
+	UART_ExitCritical(primask);
+	return is_idle;
+}
+
+/** @copydoc UART_IsIdle */
+bool UART_IsIdle(void)
+{
+	return UART_IsChannelIdle(UART_DRIVER_CHANNEL_CONSOLE);
+}
+
 /** @copydoc UART_WriteString */
 UART_Driver_Status_t UART_WriteString(const char *str){
 	if(str == NULL) return UART_DRIVER_INVALID_PARAM;
@@ -376,6 +399,5 @@ void UART_ErrorCallback(UART_HandleTypeDef *huart)
 
 	UART_StartTxDMA(state);
 }
-
 
 

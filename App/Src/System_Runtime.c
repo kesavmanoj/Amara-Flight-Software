@@ -12,6 +12,7 @@
 
 #define SYSTEM_RUNTIME_LOW_POWER_REASSESS_MAX_SAMPLES  8U
 #define SYSTEM_RUNTIME_LOW_POWER_SAMPLE_WAIT_MS       150U
+#define SYSTEM_RUNTIME_UART_DRAIN_TIMEOUT_MS           50U
 
 static uint32_t SystemRuntime_PackIpmsEventValue(const IPMS_Event_t *event)
 {
@@ -131,9 +132,20 @@ void SystemRuntime_ReportIpmsEvents(void)
 
 static void SystemRuntime_PrepareForLowPowerInternal(SystemRuntimeContext_t *context, bool include_radio_sleep)
 {
+    uint32_t start_ms;
+
     if (context == NULL)
     {
         return;
+    }
+
+    start_ms = HAL_GetTick();
+    while ((HAL_GetTick() - start_ms) < SYSTEM_RUNTIME_UART_DRAIN_TIMEOUT_MS)
+    {
+        if (UART_IsIdle() && UART_IsChannelIdle(UART_DRIVER_CHANNEL_TELEMETRY))
+        {
+            break;
+        }
     }
 
     (void)ADC_Monitor_Stop();

@@ -54,6 +54,54 @@ static void IPMS_ExitCritical(uint32_t primask)
 }
 
 /* Must be called with IPMS critical section held. */
+static IPMS_Reason_t IPMS_GetSampleTransitionReason(IPMS_PowerState_t current_state,
+                                                    IPMS_PowerState_t desired_state)
+{
+    if ((desired_state == IPMS_POWER_STATE_RECOVERY) ||
+        ((current_state == IPMS_POWER_STATE_RECOVERY) &&
+         (desired_state == IPMS_POWER_STATE_NORMAL)))
+    {
+        return IPMS_REASON_BATTERY_RECOVERED;
+    }
+
+    return IPMS_REASON_BATTERY_LOW;
+}
+
+/* Must be called with IPMS critical section held. */
+static void IPMS_UpdatePendingActionForCurrentState(void)
+{
+    if (g_ipms.policy_mode == IPMS_POLICY_MONITOR_ONLY)
+    {
+        g_ipms.pending_action = IPMS_ACTION_NONE;
+        g_ipms.action_armed_for_state = false;
+        return;
+    }
+
+    if (g_ipms.pending_action != IPMS_ACTION_NONE)
+    {
+        return;
+    }
+
+    if (g_ipms.action_armed_for_state)
+    {
+        return;
+    }
+
+    if ((g_ipms.power_state == IPMS_POWER_STATE_SLEEP_CANDIDATE) &&
+        (g_ipms.policy_mode >= IPMS_POLICY_ENABLE_SLEEP))
+    {
+        g_ipms.pending_action = IPMS_ACTION_ENTER_SLEEP;
+        g_ipms.action_armed_for_state = true;
+    }
+    else if ((g_ipms.power_state == IPMS_POWER_STATE_STOP_CANDIDATE) &&
+             (g_ipms.policy_mode >= IPMS_POLICY_ENABLE_SLEEP_AND_STOP))
+    {
+        g_ipms.pending_action = IPMS_ACTION_ENTER_STOP;
+        g_ipms.action_armed_for_state = true;
+    }
+}
+
+/* Must be called with IPMS critical section held. */
 static void IPMS_ResetContext(void)
 {
     memset(&g_ipms, 0, sizeof(g_ipms));
@@ -392,7 +440,7 @@ IPMS_Status_t IPMS_ProcessBatterySample(float measured_battery_voltage, uint32_t
     if (g_ipms.candidate_count >= required_samples)
     {
         IPMS_ApplyState(desired_state,
-                        (desired_state == IPMS_POWER_STATE_RECOVERY) ? IPMS_REASON_BATTERY_RECOVERED : IPMS_REASON_BATTERY_LOW,
+                        IPMS_GetSampleTransitionReason(g_ipms.power_state, desired_state),
                         now_ms);
     }
 
@@ -441,11 +489,7 @@ IPMS_Status_t IPMS_SetPolicyMode(IPMS_PolicyMode_t mode, uint32_t now_ms)
     }
 
     g_ipms.policy_mode = mode;
-    if (mode == IPMS_POLICY_MONITOR_ONLY)
-    {
-        g_ipms.pending_action = IPMS_ACTION_NONE;
-        g_ipms.action_armed_for_state = false;
-    }
+    IPMS_UpdatePendingActionForCurrentState();
     IPMS_PostModeEvent(IPMS_EVENT_POLICY_MODE_CHANGE, IPMS_REASON_POLICY, now_ms);
     IPMS_ExitCritical(primask);
     return IPMS_STATUS_OK;

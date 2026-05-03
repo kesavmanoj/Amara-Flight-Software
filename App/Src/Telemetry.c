@@ -396,9 +396,6 @@ Telemetry_Status_t Telemetry_ProcessStep(G2S_Link_Handle_t *g2s_link){
 
 	if((downlink_mode == TELEM_DOWNLINK_RADIO_WITH_UART_MIRROR) &&
 	   ((radio_ok && send_radio) || (uart_ok && send_uart))){
-		if((send_radio && !radio_ok) || (send_uart && !uart_ok)){
-			g_telem_transport_errors++;
-		}
 		frame_pending = false;
 		g_telem_sent_frames++;
 		g_telem_last_process_status = TELEM_STATUS_OK;
